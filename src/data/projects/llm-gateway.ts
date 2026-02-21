@@ -4,7 +4,7 @@ export const llmGateway: Project = {
   id: "llm-gateway",
   name: "LLM Gateway",
   description:
-    "Intelligent multi-provider LLM gateway with cost-optimized routing, semantic caching, automated benchmarking, and real-time observability. Drop-in OpenAI API replacement.",
+    "Multi-tenant SaaS LLM gateway with cost-optimized routing, semantic caching, per-tenant isolation, Stripe billing, and a Next.js control dashboard. Drop-in OpenAI API replacement.",
   repo: "https://github.com/aptsalt/llm-gateway",
   languages: ["TypeScript", "SQL"],
   designPatterns: [
@@ -30,7 +30,7 @@ export const llmGateway: Project = {
       whatItIs:
         "Wraps an object with additional behavior by stacking layers around it, each adding functionality without modifying the original object.",
       howProjectUsesIt:
-        "The middleware chain (logging, auth, rate-limit, cache-check, metrics) decorates each incoming request with cross-cutting concerns before it reaches the route handler.",
+        "The middleware chain (logging, tenant resolution, auth, rate-limit, cache-check, metrics) decorates each incoming request with cross-cutting concerns before it reaches the route handler.",
     },
     {
       name: "Observer Pattern",
@@ -54,7 +54,7 @@ export const llmGateway: Project = {
       whatItIs:
         "Abstracts data access behind a collection-like interface, decoupling business logic from the specific database or ORM implementation.",
       howProjectUsesIt:
-        "Drizzle ORM provides the repository abstraction over PostgreSQL, encapsulating usage logs, budget queries, and provider configurations behind typed query methods.",
+        "Drizzle ORM provides the repository abstraction over PostgreSQL, encapsulating usage logs, budget queries, organization lookups, and provider configurations behind typed query methods.",
     },
     {
       name: "Factory Pattern",
@@ -62,7 +62,31 @@ export const llmGateway: Project = {
       whatItIs:
         "Encapsulates object creation logic, allowing the system to instantiate objects without specifying their exact class at compile time.",
       howProjectUsesIt:
-        "Provider instances (OpenAI, Anthropic, Ollama) are created through a factory that reads configuration and instantiates the correct provider adapter with appropriate credentials and settings.",
+        "Provider instances (OpenAI, Anthropic, Ollama) are created through a factory that reads per-tenant configuration and instantiates the correct provider adapter with the tenant's own keys or platform fallback credentials.",
+    },
+    {
+      name: "Tenant Isolation Pattern",
+      category: "architectural",
+      whatItIs:
+        "Ensures that each tenant in a multi-tenant system operates in a logically isolated environment where their data, configuration, rate limits, and resource consumption cannot leak into or be affected by other tenants. Isolation is enforced at every layer: database (Row Level Security, org-scoped queries), cache (namespaced keys), rate limiting (per-org counters), and provider credentials (per-org key vaults).",
+      howProjectUsesIt:
+        "Every request is resolved to an organization via the tenant resolution middleware (API key lookup). From that point, all downstream operations are scoped: Redis cache keys are prefixed with `gw:cache:{orgId}:`, rate limit counters use `ratelimit:{orgId}:{window}`, database queries filter by org_id, and provider credentials are loaded from the organization's own JSONB key vault with platform fallback. Row Level Security policies on the organizations and org_members tables ensure the Supabase dashboard queries never cross tenant boundaries.",
+    },
+    {
+      name: "BYOK (Bring Your Own Key) Pattern",
+      category: "architectural",
+      whatItIs:
+        "Allows tenants to supply their own API keys for third-party services rather than relying exclusively on platform-managed credentials. The system merges tenant-provided keys with platform defaults, preferring tenant keys when available and falling back to platform keys for providers the tenant has not configured. This reduces platform costs, gives enterprises direct billing relationships with providers, and satisfies compliance requirements around credential ownership.",
+      howProjectUsesIt:
+        "Each organization has a `provider_keys` JSONB column storing encrypted credentials for OpenAI, Anthropic, and other providers. When the provider factory creates a provider instance for a request, it checks the tenant's key vault first. If the tenant has a key for the selected provider, that key is used. Otherwise, the platform's own key is used as a fallback (available on Starter plans and above). This means enterprise customers can use their own negotiated rates and volume discounts while still benefiting from the gateway's routing, caching, and observability.",
+    },
+    {
+      name: "Webhook Event Processing",
+      category: "behavioral",
+      whatItIs:
+        "A pattern for handling asynchronous event notifications from external services. The system receives HTTP POST callbacks (webhooks) containing event payloads, verifies their authenticity using cryptographic signatures, and processes them idempotently to update internal state. Idempotency is critical because webhook delivery is at-least-once — the same event may be delivered multiple times.",
+      howProjectUsesIt:
+        "Stripe sends webhook events to the gateway's `/api/webhooks/stripe` endpoint for billing lifecycle events: `checkout.session.completed` (upgrade org plan and attach Stripe IDs), `customer.subscription.deleted` (downgrade to free plan), and `invoice.payment_failed` (flag account for follow-up). Each webhook is verified using the Stripe webhook secret and HMAC signature. Event processing is idempotent — processing the same event twice produces the same org state, preventing double-upgrades or double-downgrades.",
     },
   ],
   keyTakeaways: [
@@ -70,6 +94,9 @@ export const llmGateway: Project = {
     "Semantic caching with vector similarity can reduce LLM costs by 40-60% for repetitive workloads.",
     "Token budget enforcement must happen at the gateway level, not the application level, to prevent cost overruns.",
     "Prometheus metrics + Grafana dashboards are the industry standard for real-time observability.",
+    "Multi-tenancy in API gateways requires isolation at every layer: database, cache, rate limits, and provider credentials.",
+    "Usage-based billing with Stripe Meters allows charging per-token without building a custom metering system.",
+    "BYOK (Bring Your Own Key) reduces platform costs while giving enterprises the control they need.",
   ],
   coreConcepts: [
     {
@@ -107,7 +134,7 @@ export const llmGateway: Project = {
       whyItMatters:
         "LLM API calls are expensive and slow. Traditional exact-match caching misses semantically identical requests with different wording. Semantic caching dramatically increases cache hit rates for conversational and repetitive workloads.",
       howProjectUsesIt:
-        "Incoming prompts are embedded using a lightweight model, and their embeddings are compared against cached entries in Redis using cosine similarity. If similarity exceeds a configurable threshold (default 0.95), the cached response is returned without hitting the LLM provider.",
+        "Incoming prompts are embedded using a lightweight model, and their embeddings are compared against cached entries in Redis using cosine similarity. If similarity exceeds a configurable threshold (default 0.95), the cached response is returned without hitting the LLM provider. In v2, cache entries are namespaced per-tenant (`gw:cache:{orgId}:`) so tenants never see each other's cached responses.",
       keyTerms: [
         {
           term: "Vector Embedding",
@@ -134,7 +161,7 @@ export const llmGateway: Project = {
       whyItMatters:
         "LLM costs vary dramatically between providers and models. Without intelligent routing, organizations either overpay by always using premium models or sacrifice quality by always using the cheapest option. Cost-optimized routing balances both.",
       howProjectUsesIt:
-        "The routing engine compares per-token pricing across providers, checks model capabilities against request requirements, and selects the cheapest provider that satisfies the quality and capability constraints.",
+        "The routing engine compares per-token pricing across providers, checks model capabilities against request requirements, and selects the cheapest provider that satisfies the quality and capability constraints. In v2, each organization can configure custom routing weights (cost vs quality vs latency) and the router respects per-tenant provider availability based on BYOK configuration.",
       keyTerms: [
         {
           term: "Per-Token Pricing",
@@ -188,7 +215,7 @@ export const llmGateway: Project = {
       whyItMatters:
         "LLM costs can escalate rapidly, especially with high-throughput applications. Without gateway-level budget enforcement, individual applications cannot be trusted to self-regulate, and a single runaway process can consume an entire organization's AI budget.",
       howProjectUsesIt:
-        "Before forwarding a request to an LLM provider, the gateway checks the organization's remaining token budget in PostgreSQL. If the budget is exhausted, the request is rejected with a 429 status. Usage is logged atomically within a database transaction to prevent concurrent overspending.",
+        "Before forwarding a request to an LLM provider, the gateway checks the organization's remaining token budget in PostgreSQL. If the budget is exhausted, the request is rejected with a 429 status. Usage is logged atomically within a database transaction to prevent concurrent overspending. In v2, budgets are plan-based: Free gets 100K tokens/month, Starter gets 1M, Growth gets 10M, Scale gets 100M, and Enterprise gets unlimited.",
       keyTerms: [
         {
           term: "Token Budget",
@@ -204,6 +231,87 @@ export const llmGateway: Project = {
           term: "Atomic Usage Logging",
           definition:
             "Recording token consumption within a database transaction to ensure concurrent requests cannot overspend the budget due to race conditions.",
+        },
+      ],
+    },
+    {
+      name: "Multi-Tenancy",
+      slug: "multi-tenancy",
+      whatItIs:
+        "A software architecture where a single instance of the application serves multiple customers (tenants), each with logically isolated data, configuration, and resource limits. There are three main approaches: silo (separate infrastructure per tenant), pool (shared everything with logical isolation), and bridge (shared compute, separate databases). Multi-tenancy is the foundation of SaaS economics — it allows one deployment to serve thousands of customers, amortizing infrastructure costs across all of them.",
+      whyItMatters:
+        "Without multi-tenancy, you need separate deployments for each customer, which is operationally expensive and does not scale. Multi-tenancy enables SaaS pricing models where customers pay based on usage rather than infrastructure. However, it introduces complexity around data isolation, noisy neighbor problems, and fair resource allocation. Getting isolation wrong in a multi-tenant system can lead to data leaks, security breaches, and compliance failures.",
+      howProjectUsesIt:
+        "The LLM Gateway uses the pool approach (shared database with logical isolation). All organizations share the same PostgreSQL instance, Redis cluster, and application servers, but every query is scoped by org_id, every cache key is prefixed with the org ID, and every rate limit counter is org-specific. Row Level Security (RLS) policies on Supabase ensure that dashboard queries through the Supabase client never cross tenant boundaries. The organizations table stores per-tenant configuration: plan tier, budget limits, routing weights, and provider API keys.",
+      keyTerms: [
+        {
+          term: "Tenant",
+          definition:
+            "A single customer organization that uses the SaaS platform. Each tenant has its own users, API keys, configuration, and usage data, logically isolated from other tenants.",
+        },
+        {
+          term: "Tenant Resolution",
+          definition:
+            "The process of determining which tenant a request belongs to, typically by looking up an API key or JWT token and mapping it to an organization ID.",
+        },
+        {
+          term: "Noisy Neighbor",
+          definition:
+            "A problem in shared infrastructure where one tenant's heavy usage degrades performance for other tenants. Mitigated by per-tenant rate limiting and resource quotas.",
+        },
+      ],
+    },
+    {
+      name: "Usage-Based Billing",
+      slug: "usage-based-billing",
+      whatItIs:
+        "A pricing model where customers are charged based on how much they consume rather than a flat subscription fee. In the context of API platforms, this typically means metering API calls, tokens processed, or compute time consumed, then billing at the end of the billing period. Stripe Meters provide the infrastructure for this: the application reports usage events in real-time, Stripe aggregates them, and the billing system charges accordingly at invoice time.",
+      whyItMatters:
+        "Usage-based billing aligns cost with value — customers who get more value (more API calls, more tokens) pay more. This creates natural upsell without requiring sales effort, reduces churn because customers are not locked into tiers that don't fit, and gives startups a low-barrier entry point (free tier or pay-per-use) that converts into revenue as usage grows. For AI API platforms specifically, the variable cost of LLM providers makes flat-rate pricing risky — usage-based pricing passes the variable cost through to customers while maintaining margins. The economics of SaaS pricing tiers typically follow a 10x value curve: each tier costs roughly 3x more but delivers 10x the included usage.",
+      howProjectUsesIt:
+        "The gateway tracks token usage per organization in real-time. After each LLM request, a Stripe Meter Event is fired with the token count. Stripe aggregates these meter events and includes them on the customer's monthly invoice. Five pricing tiers (Free, Starter at $29, Growth at $99, Scale at $299, Enterprise at $999) provide escalating token budgets. Budget enforcement happens at the gateway level — when an org exceeds their plan's token limit, requests are rejected with 429. Upgrade flows are handled via Stripe Checkout Sessions, and billing management via the Stripe Billing Portal.",
+      keyTerms: [
+        {
+          term: "Stripe Meter Event",
+          definition:
+            "A real-time usage record sent to Stripe's metering system. Each event includes a customer ID, a meter name, and a quantity (e.g., tokens consumed). Stripe aggregates events and includes them on invoices.",
+        },
+        {
+          term: "Billing Period",
+          definition:
+            "The time window (typically monthly) over which usage is aggregated before an invoice is generated. Budget counters reset at the start of each billing period.",
+        },
+        {
+          term: "Overage",
+          definition:
+            "Usage that exceeds the included allocation in a pricing tier. Can be billed at a per-unit rate or blocked entirely depending on the platform's policy.",
+        },
+      ],
+    },
+    {
+      name: "Tenant Isolation",
+      slug: "tenant-isolation",
+      whatItIs:
+        "The set of mechanisms that ensure one tenant's data, configuration, and resource consumption are completely separated from another tenant's, even though they share the same infrastructure. Isolation operates at three levels: data isolation (tenant A cannot see tenant B's cached responses or usage logs), resource isolation (tenant A's traffic spike cannot exhaust tenant B's rate limits or budget), and provider isolation (tenant A's API keys are never used for tenant B's requests). In a pool-based multi-tenant architecture, isolation is enforced through application logic, database policies, and infrastructure namespacing rather than physical separation.",
+      whyItMatters:
+        "Tenant isolation is the trust foundation of any multi-tenant SaaS. A failure in isolation can result in data leaks (one tenant seeing another's data), resource starvation (noisy neighbor problem), or credential exposure (one tenant's API keys used for another's requests). These failures destroy customer trust and can have legal and compliance consequences. Isolation must be enforced at every layer of the stack, and it must be tested explicitly — you cannot assume isolation from application correctness alone.",
+      howProjectUsesIt:
+        "The gateway enforces isolation at every layer. Data isolation: Redis cache keys are prefixed with `gw:cache:{orgId}:`, so cache lookups only match within the same org. Database queries always include an org_id filter, and Supabase RLS policies enforce isolation at the database level even if application code has a bug. Resource isolation: rate limiting uses per-org counters (`ratelimit:{orgId}:{window}`) with plan-based limits (Free: 60 rpm, Starter: 300 rpm, Growth: 1000 rpm, Scale: 5000 rpm, Enterprise: unlimited). Provider isolation: each org's provider_keys JSONB column stores their own API keys, and the provider factory loads the correct key for each request. Platform fallback keys are only used when the tenant has not configured their own.",
+      keyTerms: [
+        {
+          term: "Namespace Isolation",
+          definition:
+            "Prefixing shared resource identifiers (cache keys, queue names, metric labels) with a tenant identifier to prevent cross-tenant data access in shared infrastructure.",
+        },
+        {
+          term: "Row Level Security (RLS)",
+          definition:
+            "A PostgreSQL feature that adds automatic WHERE clauses to every query based on the current user's identity, preventing queries from returning rows belonging to other tenants even if the application code forgets to filter.",
+        },
+        {
+          term: "Plan-Based Rate Limiting",
+          definition:
+            "Setting different rate limit thresholds (requests per minute, tokens per minute) based on the tenant's subscription tier, ensuring fair resource allocation across pricing tiers.",
         },
       ],
     },
@@ -241,6 +349,22 @@ export const llmGateway: Project = {
       relevance:
         "Monitoring stack used in the gateway observability layer",
     },
+    {
+      title: "Multi-Tenancy Architecture Patterns",
+      url: "https://www.youtube.com/watch?v=x8vtmX4vF9I",
+      channel: "ByteByteGo",
+      durationMinutes: 10,
+      relevance:
+        "Silo vs pool vs bridge multi-tenancy models — the gateway uses pool with logical isolation",
+    },
+    {
+      title: "Stripe Billing Integration for SaaS",
+      url: "https://www.youtube.com/watch?v=1XKRxeo9414",
+      channel: "Fireship",
+      durationMinutes: 12,
+      relevance:
+        "Stripe subscriptions, metered billing, and webhook handling patterns used in the billing layer",
+    },
   ],
   realWorldExamples: [
     {
@@ -275,23 +399,46 @@ export const llmGateway: Project = {
       conceptConnection:
         "Open-source multi-provider LLM proxy",
     },
+    {
+      company: "Vercel",
+      product: "Vercel Platform",
+      description:
+        "Vercel charges per-invocation for serverless functions and per-GB for bandwidth using a tiered usage-based pricing model. Their billing infrastructure uses Stripe Meters for real-time usage tracking — the same pattern the gateway uses for per-token billing. Vercel's Hobby/Pro/Enterprise tiers mirror the gateway's Free/Starter/Growth/Scale/Enterprise structure.",
+      conceptConnection:
+        "Usage-based SaaS billing with Stripe Meters, tiered pricing model",
+    },
+    {
+      company: "Stripe",
+      product: "Stripe API Platform",
+      description:
+        "Stripe itself uses usage-based billing for its API (2.9% + 30 cents per transaction). Their own billing infrastructure powers the gateway's payment processing — a conceptual mirror where the billing provider is also a real-world example of the billing pattern. Stripe's API key model (publishable/secret, test/live prefixes) inspired the gateway's API key design (gw-prod-, gw-stg-, gw-dev- prefixes).",
+      conceptConnection:
+        "Usage-based API billing, API key design patterns, webhook-driven architecture",
+    },
   ],
   cicd: {
     overview:
-      "TypeScript-based CI/CD pipeline with containerized local development, automated testing, and database migration management.",
+      "TypeScript-based CI/CD pipeline with containerized local development, automated testing, dashboard builds, and database migration management.",
     stages: [
       {
-        name: "Build",
+        name: "Build — Gateway",
         tool: "tsc",
         description:
-          "TypeScript compiled to JavaScript ES modules.",
+          "TypeScript compiled to JavaScript ES modules for the Hono gateway server.",
         commands: ["npm run build", "tsc --project tsconfig.json"],
+      },
+      {
+        name: "Build — Dashboard",
+        tool: "Next.js",
+        description:
+          "Next.js dashboard built with `next build`, producing optimized static and server-rendered pages for the control panel.",
+        commands: ["cd dashboard && npm run build", "next build"],
       },
       {
         name: "Testing",
         tool: "Vitest",
         description:
-          "Unit and integration tests run on every push.",
+          "Unit and integration tests run on every push, covering routing logic, tenant isolation, billing webhooks, and cache behavior.",
         commands: ["npm run test", "vitest run --coverage"],
       },
       {
@@ -305,7 +452,7 @@ export const llmGateway: Project = {
         name: "Database Migrations",
         tool: "Drizzle Kit",
         description:
-          "SQL migrations generated from TypeScript schema definitions.",
+          "SQL migrations generated from TypeScript schema definitions, including multi-tenant tables (organizations, org_members, usage_daily).",
         commands: ["drizzle-kit generate", "drizzle-kit push"],
       },
       {
@@ -317,48 +464,60 @@ export const llmGateway: Project = {
       },
     ],
     infrastructure:
-      "Node.js >=20, strict TypeScript mode, ES modules throughout.",
-    diagram: `[tsc build] → [Vitest] → [Docker Build] → [docker-compose up]
-                                         ↓
-                              ┌──────────┼──────────┐
-                              │          │          │
-                          PostgreSQL   Redis   Prometheus
-                                                    │
-                                                 Grafana`,
+      "Node.js >=20, strict TypeScript mode, ES modules throughout. Dashboard: Next.js 16, Supabase Auth, Tailwind v4, shadcn/ui.",
+    diagram: `[tsc build] → [next build] → [Vitest] → [Docker Build] → [docker-compose up]
+                                                        ↓
+                                             ┌──────────┼──────────┐
+                                             │          │          │
+                                         PostgreSQL   Redis   Prometheus
+                                         (Supabase)            │
+                                                             Grafana`,
   },
   architecture: [
     {
       title: "System Overview",
-      content: `The LLM Gateway sits between client applications and multiple LLM providers (OpenAI, Anthropic, Ollama). It exposes an OpenAI-compatible API so any existing OpenAI SDK client can use it as a drop-in replacement.
+      content: `The LLM Gateway sits between client applications and multiple LLM providers (OpenAI, Anthropic, Ollama). It exposes an OpenAI-compatible API so any existing OpenAI SDK client can use it as a drop-in replacement. In v2, the gateway is multi-tenant — each organization gets isolated routing, caching, rate limits, and billing.
 
 **Request Flow:**
 1. Client sends request to gateway (OpenAI-compatible format)
-2. Semantic cache check — if a similar prompt was seen before, return cached response
-3. Token budget check — verify the org/user hasn't exceeded their budget
-4. Router selects optimal provider based on cost, latency, model capability
-5. Request forwarded to selected provider with retry/failover logic
-6. Response streamed back to client
-7. Metrics emitted to Prometheus, usage logged to PostgreSQL`,
+2. Tenant resolution — API key lookup resolves the organization and plan
+3. Rate limit check — per-tenant limits based on plan tier
+4. Semantic cache check — if a similar prompt was seen before (within this tenant's namespace), return cached response
+5. Token budget check — verify the org hasn't exceeded their plan's budget
+6. Router selects optimal provider based on org's routing config and provider availability
+7. Provider credentials loaded — tenant's BYOK key or platform fallback
+8. Request forwarded to selected provider with retry/failover logic
+9. Response streamed back to client
+10. Usage logged to PostgreSQL, Stripe Meter Event fired, metrics emitted to Prometheus`,
       diagram: `Client App (OpenAI SDK)
        │
        ▼
-┌─────────────────┐
-│   LLM Gateway   │
-│  ┌───────────┐  │
-│  │ Semantic   │  │
-│  │ Cache      │──┤──→ Redis
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Token     │  │
-│  │ Budget    │──┤──→ PostgreSQL
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Router    │  │
-│  └─────┬─────┘  │
-└────────┼────────┘
-    ┌────┼────┐
-    ▼    ▼    ▼
- OpenAI Anthropic Ollama`,
+┌──────────────────────┐
+│    LLM Gateway       │
+│  ┌────────────────┐  │
+│  │ Tenant         │  │
+│  │ Resolution     │──┤──→ PostgreSQL (API key → org lookup)
+│  └────────────────┘  │
+│  ┌────────────────┐  │
+│  │ Rate Limiter   │──┤──→ Redis (per-tenant counters)
+│  └────────────────┘  │
+│  ┌────────────────┐  │
+│  │ Semantic       │  │
+│  │ Cache          │──┤──→ Redis (gw:cache:{orgId}:*)
+│  └────────────────┘  │
+│  ┌────────────────┐  │
+│  │ Token Budget   │──┤──→ PostgreSQL (org budget check)
+│  └────────────────┘  │
+│  ┌────────────────┐  │
+│  │ Router         │  │
+│  └───────┬────────┘  │
+└──────────┼───────────┘
+      ┌────┼────┐
+      ▼    ▼    ▼
+   OpenAI Anthropic Ollama
+      │
+      ▼
+  Stripe (meter event)`,
     },
     {
       title: "Routing Engine",
@@ -370,9 +529,11 @@ export const llmGateway: Project = {
 
 **Capability-Based Routing:** Some models support function calling, vision, or large context windows. The router matches request requirements to provider capabilities.
 
-**Weighted Random:** Distributes load across providers based on configurable weights.
+**Weighted Random:** Distributes load across providers based on configurable weights. In v2, each org can set custom weights via the dashboard.
 
-**Failover Chain:** If the primary provider fails, automatically tries the next provider in a priority-ordered chain. Implements circuit breaker to avoid hammering a down provider.`,
+**Failover Chain:** If the primary provider fails, automatically tries the next provider in a priority-ordered chain. Implements circuit breaker to avoid hammering a down provider.
+
+**Per-Tenant Provider Registry:** In v2, the available providers for a request depend on the tenant. If a tenant has configured their own OpenAI key (BYOK), that provider is available with the tenant's key. If not, the platform key is used as fallback (paid plans only). Free tier tenants can only use providers they bring their own keys for.`,
     },
     {
       title: "Caching Layer",
@@ -384,25 +545,89 @@ export const llmGateway: Project = {
 3. If similarity exceeds threshold (configurable, default 0.95), cached response is returned
 4. Cache entries have TTL and are evicted using LRU policy
 
+**Per-Tenant Namespacing (v2):** All cache keys are prefixed with \`gw:cache:{orgId}:\` so tenants never see each other's cached responses. This means if Org A caches a response for "explain quantum computing", Org B asking the same question will NOT get a cache hit — each tenant builds their own cache independently.
+
 **Why Redis:** Sub-millisecond lookups, built-in TTL, sorted sets for similarity search, persistence options.`,
     },
     {
       title: "Observability Stack",
       content: `**Metrics (Prometheus + prom-client):**
-- Request count by provider, model, status
+- Request count by provider, model, status, org_id
 - Token usage (prompt + completion) by org/user
 - Latency histograms (p50, p95, p99)
-- Cache hit/miss ratios
+- Cache hit/miss ratios per tenant
 - Circuit breaker state changes
 - Active connections gauge
+- Billing events (Stripe meter event success/failure)
 
 **Dashboards (Grafana):**
 - Pre-built dashboards for cost tracking, latency monitoring, and usage analytics
 - Alerting rules for budget overruns, high error rates, latency spikes
 
+**Control Dashboard (Next.js):**
+- Per-org usage overview, API key management, routing configuration
+- Billing management via Stripe portal integration
+- Provider configuration and BYOK key management
+
 **Structured Logging:**
-- JSON-formatted logs with request correlation IDs
+- JSON-formatted logs with request correlation IDs and org_id
 - Log levels: debug, info, warn, error`,
+    },
+    {
+      title: "Multi-Tenant Architecture",
+      content: `**Tenant Resolution** is the first step in every request. The middleware chain resolves the API key to an organization:
+
+1. Extract Bearer token from Authorization header
+2. Look up API key in the api_keys table (with org_id join)
+3. Load the organization record (plan, budget, routing config, provider keys)
+4. Set tenant context on the Hono request context (\`c.set("org", org)\`)
+5. All downstream middleware and handlers read from this context
+
+**The Middleware Chain:**
+\`\`\`
+Request → Tenant Resolution → Rate Limit → Cache Check → Budget Check → Route → Provider → Response
+                │                   │            │              │
+                └── org context ────┴── orgId ───┴── org plan ──┘
+\`\`\`
+
+**Organization Creation Flow:**
+1. User signs up via Supabase Auth (email/password or OAuth)
+2. After first login, user creates an organization (name, slug)
+3. Organization is created with Free plan defaults (100K tokens/month, 60 rpm)
+4. First API key is generated with the org slug prefix: \`gw-prod-{slug}-{random}\`
+5. User can invite team members (owner, admin, member roles)
+
+**Environment Prefixes:** API keys use environment prefixes to separate traffic:
+- \`gw-prod-\` — production traffic, counted toward billing
+- \`gw-stg-\` — staging traffic, counted but with higher rate limits for testing
+- \`gw-dev-\` — development traffic, not counted toward billing, lower rate limits`,
+    },
+    {
+      title: "Billing & Plans",
+      content: `**Stripe Integration** handles all billing through raw fetch calls (no Stripe SDK dependency, keeping the gateway lightweight):
+
+**Plan Tiers:**
+| Tier | Price | Tokens/Month | Rate Limit | Features |
+|------|-------|-------------|------------|----------|
+| Free | $0 | 100K | 60 rpm | 2 providers, basic routing |
+| Starter | $29/mo | 1M | 300 rpm | All providers, basic caching, BYOK |
+| Growth | $99/mo | 10M | 1,000 rpm | Semantic cache, budget alerts, analytics |
+| Scale | $299/mo | 100M | 5,000 rpm | Custom routing, SLA, priority support |
+| Enterprise | $999/mo | Unlimited | Unlimited | On-prem, SSO, dedicated support |
+
+**Usage Tracking Flow:**
+1. After each LLM request, token usage is logged to the \`usage_logs\` table with org_id
+2. A Stripe Meter Event is fired with the token count: \`POST /v1/billing/meter_events\`
+3. Daily usage is aggregated into the \`usage_daily\` rollup table for fast dashboard queries
+4. Budget counters on the organizations table are updated atomically
+
+**Stripe Webhook Events:**
+- \`checkout.session.completed\` — customer upgraded, attach stripe_customer_id and stripe_subscription_id to org, update plan tier
+- \`customer.subscription.deleted\` — subscription cancelled, downgrade org to Free plan
+- \`invoice.payment_failed\` — payment failed, flag account, send notification
+
+**Budget Enforcement:**
+Before processing a request, the gateway checks \`tokens_used_this_month\` against \`monthly_token_budget\`. If the org has exceeded their plan limit, the request is rejected with HTTP 429 and a message indicating the budget is exhausted. Budget counters reset at the start of each billing period (tracked by \`budget_reset_at\`).`,
     },
   ],
   technologies: [
@@ -438,11 +663,13 @@ The Hono framework and Drizzle ORM both have first-class TypeScript support, pro
 - **ES modules** (\`"type": "module"\` in package.json) — modern import/export syntax
 - **Path aliases** for clean imports
 - **Zod schemas** provide runtime validation that also generates TypeScript types
-- **Drizzle schemas** are TypeScript-first — database types are inferred from schema definitions`,
+- **Drizzle schemas** are TypeScript-first — database types are inferred from schema definitions
+- **Supabase client** is fully typed — Row Level Security policies are type-checked at the query level
+- **Next.js dashboard** uses TypeScript strict mode with server/client component type boundaries`,
       featuresInProject: [
         {
           feature: "Strict Type Safety Across the Gateway",
-          description: "TypeScript strict mode ensures every provider response shape, routing configuration, and database schema is type-checked at compile time, preventing runtime crashes in production.",
+          description: "TypeScript strict mode ensures every provider response shape, routing configuration, tenant context, and database schema is type-checked at compile time, preventing runtime crashes in production.",
         },
         {
           feature: "OpenAI-Compatible API Types",
@@ -458,7 +685,7 @@ The Hono framework and Drizzle ORM both have first-class TypeScript support, pro
         },
         {
           feature: "Drizzle ORM Schema Definitions",
-          description: "Database table schemas are written as TypeScript objects using Drizzle's pgTable API, and query result types are automatically inferred from these definitions.",
+          description: "Database table schemas — including multi-tenant tables (organizations, org_members, usage_daily) — are written as TypeScript objects using Drizzle's pgTable API, and query result types are automatically inferred from these definitions.",
         },
       ],
       coreConceptsMarkdown: `### Type System Fundamentals
@@ -624,16 +851,19 @@ Key features:
       howItWorksInProject: `- \`src/index.ts\` — Creates Hono app, registers middleware and routes
 - \`src/server.ts\` — Node.js server adapter (\`@hono/node-server\`)
 - \`src/gateway/\` — Route handlers for the OpenAI-compatible API
+- \`src/middleware/tenant.ts\` — Tenant resolution middleware (API key → org lookup)
+- \`src/middleware/rate-limit.ts\` — Per-tenant rate limiting with plan-based limits
 - \`@hono/zod-validator\` validates request bodies against Zod schemas
-- Middleware chain: logging → auth → rate-limit → cache-check → route → metrics`,
+- Middleware chain: logging → tenant resolution → rate-limit → cache-check → budget-check → route → metrics
+- \`src/api/webhooks/stripe.ts\` — Stripe webhook handler for billing events`,
       featuresInProject: [
         {
           feature: "OpenAI-Compatible API Endpoints",
           description: "Hono route handlers implement the /v1/chat/completions, /v1/embeddings, and /v1/models endpoints, making the gateway a drop-in replacement for the OpenAI API.",
         },
         {
-          feature: "Middleware Pipeline",
-          description: "Hono's middleware chain processes every request through logging, authentication, rate limiting, cache checking, and metrics collection before reaching the route handler.",
+          feature: "Multi-Tenant Middleware Pipeline",
+          description: "Hono's middleware chain processes every request through tenant resolution, rate limiting, cache checking, budget enforcement, and metrics collection, with the org context flowing through the entire chain.",
         },
         {
           feature: "Request Validation with Zod",
@@ -807,30 +1037,31 @@ Components:
 - **Migration generation** — \`drizzle-kit generate\` diffs your schema and generates SQL migrations automatically.
 - **Performance** — no query overhead, no runtime schema parsing. Queries are compiled at build time.`,
       howItWorksInProject: `- \`src/db/\` contains schema definitions and migration logic
-- Schema defines tables for: providers, models, usage_logs, budgets, cache_entries
+- Schema defines tables for: providers, models, usage_logs, budgets, cache_entries, organizations, org_members, api_keys, usage_daily
 - \`drizzle-kit push\` applies schema changes during development
 - \`drizzle-kit generate\` creates versioned SQL migrations for production
-- Queries use the relational query builder for joins and aggregations`,
+- Queries use the relational query builder for joins and aggregations
+- Multi-tenant queries always filter by org_id: \`db.select().from(usageLogs).where(eq(usageLogs.orgId, org.id))\``,
       featuresInProject: [
         {
           feature: "Usage Logging",
-          description: "Every LLM request is logged to a usage_logs table via Drizzle insert queries, capturing provider, model, token counts, cost, and latency for analytics and billing.",
+          description: "Every LLM request is logged to a usage_logs table via Drizzle insert queries, capturing provider, model, token counts, cost, latency, org_id, and timestamps for analytics and billing.",
         },
         {
           feature: "Budget Enforcement",
           description: "Drizzle queries aggregate token usage and costs per organization from the budgets and usage_logs tables to enforce spending limits before forwarding requests.",
         },
         {
-          feature: "Provider Configuration Management",
-          description: "Provider and model configurations are stored in PostgreSQL tables defined with Drizzle schemas, allowing dynamic updates to routing weights, pricing, and capabilities.",
+          feature: "Multi-Tenant Schema",
+          description: "Drizzle schemas define the organizations, org_members, and usage_daily tables that power multi-tenancy, with foreign keys enforcing referential integrity between tenants and their data.",
         },
         {
           feature: "Schema Migration Pipeline",
-          description: "Drizzle Kit generates SQL migrations from TypeScript schema changes and applies them during development with drizzle-kit push, ensuring the database stays in sync with the codebase.",
+          description: "Drizzle Kit generates SQL migrations from TypeScript schema changes — including the v2 multi-tenant tables — and applies them during development with drizzle-kit push, ensuring the database stays in sync with the codebase.",
         },
         {
           feature: "Cost Analytics Aggregations",
-          description: "Drizzle's SQL template tag enables type-safe aggregation queries (SUM, AVG, GROUP BY) for cost and latency analytics across providers, models, and time periods.",
+          description: "Drizzle's SQL template tag enables type-safe aggregation queries (SUM, AVG, GROUP BY) for per-tenant cost and latency analytics across providers, models, and time periods.",
         },
       ],
       coreConceptsMarkdown: `### Schema Definition
@@ -991,37 +1222,40 @@ npx drizzle-kit studio
 - Budget configurations (transactional reads/writes)
 - Provider configurations (low-write, high-read)
 - API keys and auth data (security-critical)
+- Organizations and tenant data (multi-tenant core)
+- Daily usage rollups (analytics)
 
 PostgreSQL handles all these workloads:
-- JSONB columns store flexible provider response metadata
+- JSONB columns store flexible provider response metadata and per-tenant provider keys
 - Indexes on timestamp columns enable fast time-range queries
 - Transactions ensure budget enforcement is atomic
-- Row-level security can protect multi-tenant data`,
-      howItWorksInProject: `- Runs as a Docker container in the docker-compose stack
+- Row-level security protects multi-tenant data via Supabase RLS policies`,
+      howItWorksInProject: `- Hosted on Supabase (managed PostgreSQL with Auth and RLS)
 - Drizzle ORM connects via the \`pg\` driver
 - Schema managed by Drizzle Kit migrations
-- Tables: providers, models, usage_logs, budgets, api_keys
-- JSONB columns store provider-specific metadata and response details`,
+- Tables: providers, models, usage_logs, budgets, api_keys, organizations, org_members, usage_daily
+- JSONB columns store provider-specific metadata, per-tenant routing weights, and encrypted provider keys
+- Row Level Security policies enforce tenant isolation at the database level`,
       featuresInProject: [
         {
           feature: "Usage Logs Storage",
-          description: "High-write usage_logs table stores every LLM request with provider, model, token counts, cost, latency, and timestamps, with indexes on timestamp columns for fast time-range queries.",
+          description: "High-write usage_logs table stores every LLM request with provider, model, token counts, cost, latency, org_id, and timestamps, with indexes on (org_id, created_at) for fast per-tenant time-range queries.",
         },
         {
           feature: "Budget Tracking with Transactions",
           description: "PostgreSQL transactions ensure budget enforcement is atomic — checking the remaining budget and logging the usage happen in a single transaction so concurrent requests cannot overspend.",
         },
         {
-          feature: "Provider Metadata in JSONB",
-          description: "JSONB columns store flexible provider-specific metadata and response details that vary between OpenAI, Anthropic, and Ollama without requiring schema changes for each provider.",
+          feature: "Multi-Tenant Organization Data",
+          description: "The organizations table stores per-tenant configuration: plan tier, token budget, routing weights (JSONB), provider API keys (JSONB), and Stripe billing IDs. Foreign keys from usage_logs, api_keys, and org_members enforce referential integrity.",
         },
         {
-          feature: "API Key and Auth Storage",
-          description: "API keys, organization data, and authentication credentials are stored in PostgreSQL with proper indexing, serving as the security backbone of the gateway's multi-tenant architecture.",
+          feature: "Row Level Security for Tenant Isolation",
+          description: "Supabase RLS policies on organizations and org_members tables ensure that dashboard queries through the Supabase client are automatically scoped to the authenticated user's organizations, preventing cross-tenant data access.",
         },
         {
           feature: "Analytics and Reporting Queries",
-          description: "PostgreSQL's window functions, CTEs, and aggregations power the gateway's cost analytics, enabling queries like per-provider cost breakdown, daily usage trends, and latency percentile calculations.",
+          description: "PostgreSQL's window functions, CTEs, and aggregations power the gateway's cost analytics, enabling queries like per-provider cost breakdown, daily usage trends, and latency percentile calculations — all scoped by org_id.",
         },
       ],
       coreConceptsMarkdown: `### ACID Properties
@@ -1157,30 +1391,33 @@ CREATE INDEX idx_metadata ON logs USING GIN (metadata);
 - **Bitmaps** — bit-level operations`,
       explainLikeImTen: `Imagine you have a whiteboard right next to your desk where you write down things you need to remember quickly — like phone numbers you just looked up. It's way faster to glance at your whiteboard than to dig through a filing cabinet. Redis is that whiteboard for computers. It keeps important information in its super-fast memory so the computer doesn't have to go searching through slower storage every time. The only catch is that whiteboards have limited space, so you only keep the most important stuff there.`,
       realWorldAnalogy: `Redis is like the counter at a busy deli. The most popular items (pre-made sandwiches, daily specials) are kept right at the counter for instant service. Less popular items are stored in the kitchen (disk-based database). The counter has limited space, so they rotate items based on popularity and freshness — old items get cleared, popular items stay up front.`,
-      whyWeUsedIt: `The LLM gateway uses Redis for two critical functions:
+      whyWeUsedIt: `The LLM gateway uses Redis for three critical functions:
 
 **1. Semantic Cache:** LLM responses are cached in Redis with their prompt embeddings. When a new request arrives, its embedding is compared against cached entries using sorted sets. Sub-millisecond lookups make this viable for every request.
 
-**2. Rate Limiting:** Token buckets are implemented as Redis counters with TTL. Distributed rate limiting works because Redis is a single source of truth across multiple gateway instances.
+**2. Rate Limiting:** Token buckets are implemented as Redis counters with TTL. Distributed rate limiting works because Redis is a single source of truth across multiple gateway instances. In v2, rate limit keys are namespaced per-tenant: \`ratelimit:{orgId}:{window}\`.
+
+**3. Per-Tenant Cache Namespacing:** In v2, all cache keys are prefixed with \`gw:cache:{orgId}:\` so tenants never see each other's cached responses.
 
 **Why not PostgreSQL for caching?** Disk-based databases add 1-10ms per query. Redis responds in <1ms. For a gateway that processes every request, this latency difference is critical.`,
       howItWorksInProject: `- \`ioredis\` client library (better than node-redis for TypeScript)
-- Cache entries stored as hashes: \`cache:{hash}\` → \`{prompt, response, embedding, ttl}\`
-- Sorted sets for similarity search: \`cache:embeddings\` → \`{score: similarity, member: hash}\`
+- Cache entries stored as hashes: \`gw:cache:{orgId}:{hash}\` → \`{prompt, response, embedding, ttl}\`
+- Sorted sets for similarity search: \`gw:cache:{orgId}:embeddings\` → \`{score: similarity, member: hash}\`
 - Rate limit counters: \`ratelimit:{orgId}:{window}\` → count with TTL
-- Connection pooling via ioredis built-in pool`,
+- Connection pooling via ioredis built-in pool
+- Per-tenant namespace isolation ensures no cross-tenant cache leaks`,
       featuresInProject: [
         {
-          feature: "Semantic Cache Storage",
-          description: "LLM responses are cached in Redis hashes with their prompt embeddings, enabling sub-millisecond lookups that can serve cached responses for similar prompts without hitting the LLM provider.",
+          feature: "Per-Tenant Semantic Cache Storage",
+          description: "LLM responses are cached in Redis hashes namespaced by org ID (`gw:cache:{orgId}:{hash}`), enabling sub-millisecond lookups that can serve cached responses for similar prompts without hitting the LLM provider, with full tenant isolation.",
         },
         {
           feature: "Embedding Similarity Search",
-          description: "Redis sorted sets store prompt embeddings with similarity scores, allowing the gateway to find cached responses that are semantically similar (above a configurable threshold) to incoming prompts.",
+          description: "Redis sorted sets store prompt embeddings with similarity scores per tenant, allowing the gateway to find cached responses that are semantically similar (above a configurable threshold) to incoming prompts.",
         },
         {
-          feature: "Rate Limiting Counters",
-          description: "Token bucket rate limiting is implemented using Redis counters with TTL, providing distributed rate limiting that works correctly across multiple gateway instances.",
+          feature: "Per-Tenant Rate Limiting Counters",
+          description: "Plan-based rate limiting is implemented using Redis counters with TTL, namespaced by org ID (`ratelimit:{orgId}:{window}`), providing distributed rate limiting with per-tenant thresholds (60 rpm Free, 300 rpm Starter, 1000 rpm Growth, 5000 rpm Scale).",
         },
         {
           feature: "Cache TTL and Eviction",
@@ -1337,13 +1574,14 @@ Key components:
 Prometheus is the industry standard for this. The \`prom-client\` library provides a simple API to expose metrics that Prometheus scrapes, and Grafana dashboards visualize them.`,
       howItWorksInProject: `- \`prom-client\` library instruments the gateway code
 - Custom metrics: request_duration_histogram, token_usage_counter, cache_hits_total, provider_errors_total
+- Metrics are labeled by org_id for per-tenant observability
 - Prometheus runs as a Docker container and scrapes the gateway's /metrics endpoint
 - Grafana connects to Prometheus as a data source and displays pre-built dashboards
 - Alert rules defined for budget overruns and high error rates`,
       featuresInProject: [
         {
           feature: "Request Duration Histograms",
-          description: "A Prometheus histogram tracks request latency distributions by provider and model, enabling p50/p95/p99 latency calculations for routing decisions and SLA monitoring.",
+          description: "A Prometheus histogram tracks request latency distributions by provider, model, and org_id, enabling p50/p95/p99 latency calculations for routing decisions and SLA monitoring.",
         },
         {
           feature: "Token Usage Counters",
@@ -1351,7 +1589,7 @@ Prometheus is the industry standard for this. The \`prom-client\` library provid
         },
         {
           feature: "Cache Hit/Miss Ratio Tracking",
-          description: "Counters for cache hits and misses enable real-time monitoring of semantic cache effectiveness, helping tune the similarity threshold and cache TTL for optimal cost savings.",
+          description: "Counters for cache hits and misses per tenant enable real-time monitoring of semantic cache effectiveness, helping tune the similarity threshold and cache TTL for optimal cost savings.",
         },
         {
           feature: "Provider Error Rate Monitoring",
@@ -1500,12 +1738,14 @@ topk(5, sum by (provider) (rate(token_usage_total[1h])))
       realWorldAnalogy: `Zod is like airport security screening. Every piece of luggage (incoming data) goes through an X-ray machine (schema validation). The machine checks that nothing prohibited is inside and everything matches the declared contents. If something doesn't match, the item is flagged with a specific reason. Cleared items get a "verified" tag (TypeScript type) that downstream processes can trust.`,
       whyWeUsedIt: `The LLM gateway receives external HTTP requests and must validate them before processing. Zod schemas:
 - Validate incoming request bodies (model, messages, parameters)
-- Validate environment variables at startup
+- Validate environment variables at startup (including new Stripe and Supabase vars)
 - Validate provider API responses
+- Validate Stripe webhook payloads
 - Generate TypeScript types automatically — single source of truth`,
       howItWorksInProject: `- Request validation via \`@hono/zod-validator\` middleware
-- Environment variable validation in \`src/env.ts\`
+- Environment variable validation in \`src/env.ts\` (DATABASE_URL, REDIS_URL, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY)
 - Provider response schemas for type-safe response handling
+- Stripe webhook event schemas for type-safe billing event processing
 - Shared schemas between routes and database operations`,
       featuresInProject: [
         {
@@ -1514,7 +1754,7 @@ topk(5, sum by (provider) (rate(token_usage_total[1h])))
         },
         {
           feature: "Environment Variable Validation",
-          description: "At startup, Zod schemas in src/env.ts validate all required environment variables (database URLs, API keys, port numbers), failing fast with clear errors if configuration is missing or malformed.",
+          description: "At startup, Zod schemas in src/env.ts validate all required environment variables (database URLs, API keys, Stripe secrets, Supabase credentials, port numbers), failing fast with clear errors if configuration is missing or malformed.",
         },
         {
           feature: "Provider Response Parsing",
@@ -1844,29 +2084,30 @@ volumes:
 - Jest-compatible API means familiar syntax
 - Watch mode re-runs only changed tests in milliseconds`,
       howItWorksInProject: `- \`vitest.config.ts\` configures test environment
-- Tests in \`tests/\` directory test routing logic, caching, budget enforcement
+- Tests in \`tests/\` directory test routing logic, caching, budget enforcement, tenant isolation, billing webhooks
 - Mocks for external providers (no real API calls in tests)
+- Mocks for Stripe webhook events to test billing flows
 - Coverage reports generated with \`vitest run --coverage\``,
       featuresInProject: [
         {
           feature: "Routing Logic Unit Tests",
-          description: "Tests verify that the routing engine correctly selects providers based on cost, latency, and capability strategies, including edge cases like all providers being unavailable.",
+          description: "Tests verify that the routing engine correctly selects providers based on cost, latency, and capability strategies, including edge cases like all providers being unavailable and per-tenant routing weights.",
         },
         {
           feature: "Semantic Cache Tests",
-          description: "Tests validate cache hit/miss behavior, similarity threshold logic, TTL expiration, and LRU eviction to ensure the caching layer saves costs without serving stale responses.",
+          description: "Tests validate cache hit/miss behavior, similarity threshold logic, TTL expiration, LRU eviction, and per-tenant namespace isolation to ensure the caching layer saves costs without serving stale or cross-tenant responses.",
         },
         {
           feature: "Budget Enforcement Tests",
-          description: "Tests verify that requests are rejected when organizations exceed their token budgets, including concurrent request scenarios that could cause race-condition overspending.",
+          description: "Tests verify that requests are rejected when organizations exceed their token budgets, including concurrent request scenarios that could cause race-condition overspending and plan-based budget limit enforcement.",
         },
         {
           feature: "Provider Mock Testing",
           description: "vi.mock() replaces real LLM provider API calls with mock responses, enabling fast tests that validate request transformation, error handling, and response parsing without network calls.",
         },
         {
-          feature: "Circuit Breaker Behavior Tests",
-          description: "Tests simulate provider failures to verify that the circuit breaker transitions through closed, open, and half-open states correctly, and that failover routing engages as expected.",
+          feature: "Tenant Isolation and Billing Tests",
+          description: "Tests verify that tenant resolution middleware correctly maps API keys to organizations, that cross-tenant data access is prevented, and that Stripe webhook events correctly update org plan state idempotently.",
         },
       ],
       coreConceptsMarkdown: `### Test Structure
@@ -1950,6 +2191,664 @@ expect(spy).toHaveBeenCalledWith("cache-key");
         "Vitest documentation — vitest.dev",
         "Testing JavaScript with Kent C. Dodds",
         "xUnit Test Patterns by Gerard Meszaros",
+      ],
+    },
+    {
+      name: "Supabase",
+      category: "infrastructure",
+      icon: "SB",
+      tagline: "Open source Firebase alternative",
+      origin: {
+        creator: "Paul Copplestone & Ant Wilson",
+        year: 2020,
+        motivation:
+          "Firebase offered a compelling developer experience for building applications quickly, but it locked developers into Google's proprietary ecosystem with a NoSQL database. Copplestone and Wilson set out to build an open-source alternative built on PostgreSQL — giving developers the Firebase DX with the power of a relational database and the freedom to self-host.",
+      },
+      whatItIs: `Supabase is an open-source Backend-as-a-Service (BaaS) platform built on top of PostgreSQL. It provides:
+
+- **PostgreSQL Database** — fully managed Postgres with extensions, backups, and connection pooling
+- **Authentication** — email/password, OAuth (Google, GitHub, etc.), magic links, phone auth
+- **Row Level Security (RLS)** — PostgreSQL policies that restrict data access per user
+- **Realtime** — WebSocket subscriptions for database changes
+- **Storage** — S3-compatible file storage with RLS policies
+- **Edge Functions** — Deno-based serverless functions
+- **Auto-generated REST API** — PostgREST auto-generates a REST API from your schema
+- **Auto-generated GraphQL API** — pg_graphql extension
+
+Unlike Firebase, Supabase is built entirely on open-source tools: PostgreSQL, PostgREST, GoTrue (auth), Realtime (Elixir), and Kong (API gateway). You can self-host the entire stack.`,
+      explainLikeImTen: `Imagine you want to build a treehouse, but instead of having to learn plumbing, electrical wiring, and carpentry all at once, someone gives you a treehouse kit with pre-built walls, a door with a lock, running water, and lights already installed. You just have to decide how to arrange the rooms. Supabase is that kit for building apps. It gives you a database to store things, a login system so people can sign in, and rules about who can see what — all pre-built and ready to use. The cool part is that unlike some kits where you're stuck with what they give you, Supabase's kit is built with real professional tools (PostgreSQL) so you can customize anything.`,
+      realWorldAnalogy: `Supabase is like a modern office building that comes fully furnished. When you lease a floor (create a project), you get the reception desk (auth), the filing system (database), the security badge system (RLS), the intercom (realtime), and the storage room (file storage) — all ready to use on day one. You don't need to hire separate contractors for each system. But unlike a locked-down corporate office, Supabase gives you the master keys: you can rearrange anything, add custom rooms, or even move the entire building to your own land (self-host).`,
+      whyWeUsedIt: `The LLM Gateway's SaaS conversion needed three things that Supabase provides out of the box:
+
+**1. Authentication:** User signup/login for the dashboard. Supabase Auth handles email/password, OAuth, session management, and JWT tokens. No need to build auth from scratch.
+
+**2. Managed PostgreSQL with RLS:** The gateway already uses PostgreSQL (Drizzle ORM). Supabase hosts it with Row Level Security policies that enforce multi-tenant isolation at the database level — even if the application code has a bug, RLS prevents cross-tenant data access.
+
+**3. Client Library for Dashboard:** The \`@supabase/supabase-js\` client provides typed queries that respect RLS policies, making it easy to build the Next.js dashboard with per-tenant data access.
+
+**Why Supabase over Auth0 + managed Postgres separately?**
+- Single platform for auth + database + RLS = simpler architecture
+- RLS policies are co-located with the database schema
+- Supabase client handles JWT refresh, session management, and typed queries
+- Free tier is generous enough for development and small deployments
+- Open source — no vendor lock-in, can self-host for enterprise customers`,
+      howItWorksInProject: `- **Supabase Auth** handles user signup, login, OAuth, and session management for the dashboard
+- **Supabase PostgreSQL** hosts the gateway's database with all multi-tenant tables
+- **Row Level Security** policies on organizations and org_members tables enforce tenant isolation
+- **\`@supabase/supabase-js\`** client is used in the Next.js dashboard for typed, RLS-scoped queries
+- **Service Role Key** is used server-side in the gateway for admin operations that bypass RLS (e.g., tenant resolution middleware)
+- **Environment variables:** SUPABASE_URL, SUPABASE_ANON_KEY (dashboard), SUPABASE_SERVICE_KEY (gateway server)`,
+      featuresInProject: [
+        {
+          feature: "User Authentication for Dashboard",
+          description: "Supabase Auth provides email/password signup, OAuth login (Google, GitHub), session management, and JWT tokens for the Next.js control dashboard, eliminating the need to build auth from scratch.",
+        },
+        {
+          feature: "Row Level Security for Tenant Isolation",
+          description: "RLS policies on organizations, org_members, api_keys, and usage_logs tables automatically scope all dashboard queries to the authenticated user's organizations, preventing cross-tenant data access at the database level.",
+        },
+        {
+          feature: "Typed Client Queries in Dashboard",
+          description: "The @supabase/supabase-js client provides TypeScript-typed query results that respect RLS policies, making it safe and ergonomic to build dashboard pages that display per-tenant data.",
+        },
+        {
+          feature: "Service Role for Gateway Operations",
+          description: "The gateway server uses the Supabase service role key to bypass RLS for admin operations like tenant resolution (looking up any API key) and usage logging (writing to any org's usage records).",
+        },
+        {
+          feature: "Managed PostgreSQL with Extensions",
+          description: "Supabase manages PostgreSQL backups, connection pooling (PgBouncer), and provides access to extensions like pgvector (for semantic cache embeddings) and pg_cron (for budget reset scheduling).",
+        },
+      ],
+      coreConceptsMarkdown: `### Authentication Flow
+
+\`\`\`typescript
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Sign up
+const { data, error } = await supabase.auth.signUp({
+  email: "user@example.com",
+  password: "securepassword",
+});
+
+// Sign in
+const { data, error } = await supabase.auth.signInWithPassword({
+  email: "user@example.com",
+  password: "securepassword",
+});
+
+// OAuth
+const { data, error } = await supabase.auth.signInWithOAuth({
+  provider: "github",
+});
+
+// Get current user
+const { data: { user } } = await supabase.auth.getUser();
+
+// Sign out
+await supabase.auth.signOut();
+\`\`\`
+
+### Row Level Security (RLS)
+
+\`\`\`sql
+-- Enable RLS on a table
+ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
+
+-- Policy: users can only see their own organizations
+CREATE POLICY "Members see own org" ON public.organizations
+  FOR SELECT USING (
+    id IN (
+      SELECT org_id FROM public.org_members
+      WHERE user_id = auth.uid()
+    )
+  );
+
+-- Policy: owners can manage their org
+CREATE POLICY "Owners manage org" ON public.organizations
+  FOR ALL USING (owner_id = auth.uid());
+
+-- auth.uid() returns the JWT's sub claim (current user's ID)
+-- This is evaluated for EVERY query automatically
+\`\`\`
+
+### Typed Client Queries
+
+\`\`\`typescript
+// Fetch org's usage data — RLS automatically filters by user's orgs
+const { data: usage, error } = await supabase
+  .from("usage_daily")
+  .select("date, total_requests, total_tokens, total_cost_usd")
+  .eq("org_id", orgId)
+  .order("date", { ascending: false })
+  .limit(30);
+// TypeScript knows usage is UsageDaily[] | null
+\`\`\`
+
+### Service Role vs Anon Key
+
+| Key | Used By | RLS | Purpose |
+|-----|---------|-----|---------|
+| Anon Key | Dashboard (client) | Enforced | User-facing queries scoped by RLS |
+| Service Role Key | Gateway (server) | Bypassed | Admin operations (tenant resolution, usage logging) |
+
+The anon key is safe to expose in the browser — RLS policies ensure users only see their own data. The service role key must never be exposed to clients.`,
+      prosAndCons: {
+        pros: [
+          "All-in-one backend: auth + database + RLS + storage + realtime",
+          "Built on PostgreSQL — full SQL power, not a proprietary database",
+          "Row Level Security provides database-level tenant isolation",
+          "Open source — self-hostable, no vendor lock-in",
+          "Generous free tier for development and small projects",
+          "Auto-generated REST and GraphQL APIs from schema",
+        ],
+        cons: [
+          "RLS policies can be complex and hard to debug",
+          "Edge Functions are Deno-based (not Node.js), limiting library compatibility",
+          "Realtime subscriptions have connection limits on free tier",
+          "Database migrations are not as smooth as Prisma/Drizzle (use external tools)",
+          "Some PostgreSQL extensions are not available on managed platform",
+          "Auth customization (custom email templates, advanced flows) requires workarounds",
+        ],
+      },
+      alternatives: [
+        {
+          name: "Firebase",
+          comparison:
+            "Google's BaaS platform. Proprietary NoSQL database (Firestore), excellent realtime support, tight GCP integration. But vendor lock-in, no SQL, no RLS, and the NoSQL model makes complex queries difficult.",
+        },
+        {
+          name: "Auth0 + managed PostgreSQL",
+          comparison:
+            "Dedicated auth service + separate database. More flexibility in auth customization but two services to manage, no integrated RLS, and higher total cost. Auth0 is expensive at scale.",
+        },
+        {
+          name: "Clerk",
+          comparison:
+            "Modern auth-focused service with excellent DX and pre-built UI components. But auth-only — still need a separate database and no RLS integration.",
+        },
+        {
+          name: "Neon + custom auth",
+          comparison:
+            "Serverless PostgreSQL with branching. Better database scaling story but no built-in auth, no RLS integration, no client library. More assembly required.",
+        },
+      ],
+      keyAPIs: [
+        "supabase.auth.signUp() / signIn() — authentication",
+        "supabase.auth.getUser() — get current user",
+        "supabase.from(table).select() — typed queries",
+        "supabase.from(table).insert() / update() / delete() — mutations",
+        "CREATE POLICY — Row Level Security policies",
+        "auth.uid() — current user ID in SQL policies",
+        "supabase.auth.onAuthStateChange() — auth state listener",
+        "createClient(url, key) — initialize client",
+      ],
+      academicFoundations: `**Row Level Security** is rooted in the Bell-LaPadula model (1973) of access control in operating systems. The model defines security levels and access rules (no read up, no write down) to prevent information leakage between security levels. PostgreSQL's RLS is a practical implementation where security levels are defined by SQL predicates evaluated per-row.
+
+**Authentication & Authorization:** Supabase Auth implements OAuth 2.0 (RFC 6749) and OpenID Connect for identity federation. JWTs (RFC 7519) are used as bearer tokens — the same stateless authentication pattern used by most modern APIs. The JWT contains the user's ID, which RLS policies use to scope queries.
+
+**Backend-as-a-Service (BaaS):** The BaaS model emerged from the observation that most applications need the same backend components: auth, database, storage, and realtime. By commoditizing these components, BaaS platforms let developers focus on business logic. This is an application of the "don't reinvent the wheel" principle from software engineering.
+
+**PostgREST:** Supabase's auto-generated REST API uses PostgREST, which maps PostgreSQL schemas directly to RESTful endpoints. This is based on the principle of convention over configuration — the database schema IS the API definition.`,
+      furtherReading: [
+        "Supabase documentation — supabase.com/docs",
+        "PostgreSQL Row Level Security — postgresql.org/docs/current/ddl-rowsecurity.html",
+        "Supabase Architecture — supabase.com/docs/architecture",
+        "GoTrue (auth engine) — github.com/supabase/gotrue",
+      ],
+    },
+    {
+      name: "Stripe",
+      category: "library",
+      icon: "ST",
+      tagline: "Payment infrastructure for the internet",
+      origin: {
+        creator: "Patrick & John Collison",
+        year: 2010,
+        motivation:
+          "Accepting payments online was absurdly complex — merchants needed merchant accounts, payment gateways, PCI compliance audits, and weeks of integration work. The Collison brothers, two Irish-American teenagers, built Stripe to make online payments as simple as adding a few lines of code. Their insight was that payments infrastructure should be a developer tool, not a financial product.",
+      },
+      whatItIs: `Stripe is a suite of payment APIs that powers online commerce for millions of businesses. For SaaS applications, the key components are:
+
+- **Payments** — process credit cards, ACH, international payments
+- **Subscriptions** — recurring billing with plan management
+- **Billing** — invoicing, metered billing, proration
+- **Meters** — real-time usage tracking for usage-based billing
+- **Checkout** — pre-built, hosted payment pages
+- **Customer Portal** — self-service billing management
+- **Webhooks** — event notifications for billing lifecycle
+- **Connect** — marketplace payments (not used in this project)
+
+Stripe's API is REST-based with idempotency keys, versioned endpoints, and comprehensive webhook events. The API design is widely considered the gold standard for developer experience.`,
+      explainLikeImTen: `Imagine you set up a lemonade stand, but instead of just collecting coins in a jar, you want to let people pay with credit cards, set up weekly lemonade subscriptions, and charge extra for the big cups. That's a lot of work! Stripe is like hiring a super-smart cashier who handles all of that for you. The cashier collects the money, keeps track of who's subscribed, sends receipts, and even tells you when someone's card doesn't work. You just tell the cashier your prices, and they handle everything else. They take a small cut of each sale (2.9% + 30 cents) for their trouble.`,
+      realWorldAnalogy: `Stripe is like a full-service accounting firm for your online business. When you open a store, you could handle bookkeeping, invoicing, tax collection, subscription management, and payment processing yourself — but it would consume all your time. Instead, you hire an accounting firm (Stripe) that handles it all: processes payments, sends invoices, manages subscriptions, handles failed payments with automatic retries, and provides detailed financial reports. You focus on making great products; they handle the money.`,
+      whyWeUsedIt: `The LLM Gateway SaaS needs usage-based billing — customers are charged based on how many tokens they consume. Stripe provides the complete billing infrastructure:
+
+**Why Stripe over building billing from scratch:**
+- PCI compliance is handled by Stripe (no credit card data on our servers)
+- Stripe Meters track real-time usage without building a custom metering system
+- Checkout Sessions handle the upgrade flow with a hosted payment page
+- Billing Portal lets customers manage their own subscriptions
+- Webhooks notify the gateway of billing events (upgrade, cancel, payment failure)
+
+**Why raw fetch instead of the Stripe SDK:**
+The official Stripe Node.js SDK adds ~2MB to the bundle and has dependencies. Since the gateway only uses 5-6 Stripe API endpoints, raw fetch calls with typed request/response schemas keep the gateway lightweight. Each Stripe API call is just a POST request with form-encoded parameters and a Bearer token.`,
+      howItWorksInProject: `- \`src/billing/stripe.ts\` — StripeBilling class with raw fetch calls to Stripe API
+- \`src/api/webhooks/stripe.ts\` — Webhook handler for billing lifecycle events
+- Meter Events fired after each LLM request: \`POST /v1/billing/meter_events\`
+- Checkout Sessions for plan upgrades: \`POST /v1/checkout/sessions\`
+- Billing Portal for subscription management: \`POST /v1/billing_portal/sessions\`
+- Webhook verification using HMAC signature (STRIPE_WEBHOOK_SECRET)
+- Environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET`,
+      featuresInProject: [
+        {
+          feature: "Usage-Based Billing via Meter Events",
+          description: "After each LLM request, a Stripe Meter Event is fired with the token count. Stripe aggregates these events and includes them on the customer's monthly invoice, enabling per-token billing without a custom metering system.",
+        },
+        {
+          feature: "Checkout Sessions for Plan Upgrades",
+          description: "When a user clicks 'Upgrade' in the dashboard, a Stripe Checkout Session is created that redirects to a hosted payment page. After successful payment, a webhook event updates the organization's plan tier.",
+        },
+        {
+          feature: "Billing Portal for Self-Service Management",
+          description: "The Stripe Billing Portal lets customers update payment methods, view invoices, and cancel subscriptions without any custom UI — just a redirect to Stripe's hosted portal.",
+        },
+        {
+          feature: "Webhook Event Processing",
+          description: "Stripe webhooks notify the gateway of billing events: checkout.session.completed (upgrade plan), customer.subscription.deleted (downgrade to free), invoice.payment_failed (flag account). All handlers are idempotent.",
+        },
+        {
+          feature: "Lightweight Integration via Raw Fetch",
+          description: "Instead of the 2MB Stripe SDK, the gateway uses raw fetch calls with typed Zod schemas for the 5-6 Stripe endpoints it needs, keeping the gateway lightweight while maintaining type safety.",
+        },
+      ],
+      coreConceptsMarkdown: `### Stripe API Basics
+
+\`\`\`typescript
+// Raw fetch to Stripe API (no SDK dependency)
+const createCheckoutSession = async (orgId: string, priceId: string) => {
+  const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: {
+      "Authorization": \`Bearer \${STRIPE_SECRET_KEY}\`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      "mode": "subscription",
+      "line_items[0][price]": priceId,
+      "line_items[0][quantity]": "1",
+      "success_url": \`\${DASHBOARD_URL}/billing?success=true\`,
+      "cancel_url": \`\${DASHBOARD_URL}/billing?canceled=true\`,
+      "metadata[org_id]": orgId,
+    }),
+  });
+  return response.json();
+};
+\`\`\`
+
+### Meter Events for Usage-Based Billing
+
+\`\`\`typescript
+// Fire a meter event after each LLM request
+const reportUsage = async (customerId: string, tokens: number) => {
+  await fetch("https://api.stripe.com/v1/billing/meter_events", {
+    method: "POST",
+    headers: {
+      "Authorization": \`Bearer \${STRIPE_SECRET_KEY}\`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      "event_name": "token_usage",
+      "payload[stripe_customer_id]": customerId,
+      "payload[value]": tokens.toString(),
+    }),
+  });
+};
+\`\`\`
+
+### Webhook Verification
+
+\`\`\`typescript
+// Verify Stripe webhook signature
+const verifyWebhook = (payload: string, signature: string): boolean => {
+  const elements = signature.split(",");
+  const timestamp = elements.find(e => e.startsWith("t="))?.slice(2);
+  const sig = elements.find(e => e.startsWith("v1="))?.slice(3);
+
+  const signedPayload = \`\${timestamp}.\${payload}\`;
+  const expected = crypto
+    .createHmac("sha256", STRIPE_WEBHOOK_SECRET)
+    .update(signedPayload)
+    .digest("hex");
+
+  return crypto.timingSafeEqual(
+    Buffer.from(sig!),
+    Buffer.from(expected)
+  );
+};
+\`\`\`
+
+### Billing Lifecycle
+
+\`\`\`
+User clicks "Upgrade"
+    │
+    ▼
+Create Checkout Session → Stripe hosted page → Payment
+    │
+    ▼
+Webhook: checkout.session.completed
+    │
+    ▼
+Update org: plan = "growth", stripe_customer_id = "cus_...",
+            stripe_subscription_id = "sub_..."
+    │
+    ▼
+User makes API calls → Meter Events fired → Stripe aggregates
+    │
+    ▼
+End of month: Stripe creates invoice with usage charges
+\`\`\``,
+      prosAndCons: {
+        pros: [
+          "Best-in-class developer experience — clear docs, typed APIs, great error messages",
+          "Handles PCI compliance — no credit card data on your servers",
+          "Comprehensive billing features — subscriptions, meters, invoicing, portals",
+          "Webhooks for every event — reliable, retried, with signature verification",
+          "Global payments — supports 135+ currencies and local payment methods",
+          "Excellent dashboard for debugging and monitoring payments",
+        ],
+        cons: [
+          "Transaction fees (2.9% + 30 cents) are higher than interchange-plus pricing",
+          "Complex pricing for advanced features (Connect, Radar, Tax)",
+          "Vendor lock-in for payment processing (hard to switch providers)",
+          "Webhook ordering is not guaranteed — must handle out-of-order events",
+          "No offline/cash payment support",
+          "Customer portal customization is limited",
+        ],
+      },
+      alternatives: [
+        {
+          name: "Paddle",
+          comparison:
+            "Merchant of Record — handles tax collection, compliance, and international payments. Simpler but less control, higher fees, and fewer customization options. Good for indie developers.",
+        },
+        {
+          name: "LemonSqueezy",
+          comparison:
+            "Another Merchant of Record with simpler pricing. Good DX but fewer features than Stripe. No metered billing or advanced subscription management.",
+        },
+        {
+          name: "Braintree",
+          comparison:
+            "PayPal's payment platform. Lower transaction fees for high volume but worse DX, older APIs, and less modern billing features.",
+        },
+        {
+          name: "Custom billing with a payment processor",
+          comparison:
+            "Build metering, invoicing, and subscription management yourself. Full control but months of engineering effort, PCI compliance burden, and ongoing maintenance.",
+        },
+      ],
+      keyAPIs: [
+        "POST /v1/checkout/sessions — create hosted payment page",
+        "POST /v1/billing_portal/sessions — customer self-service portal",
+        "POST /v1/billing/meter_events — report usage for metered billing",
+        "POST /v1/customers — create/manage customers",
+        "POST /v1/subscriptions — manage subscriptions",
+        "Webhook events — checkout.session.completed, subscription.deleted, invoice.payment_failed",
+        "Stripe-Signature header — webhook verification",
+        "Idempotency-Key header — prevent duplicate operations",
+      ],
+      academicFoundations: `**Idempotency:** Stripe's API uses idempotency keys (a concept from mathematics and distributed systems) to ensure that retrying a request produces the same result. In algebra, an operation f is idempotent if f(f(x)) = f(x). Stripe applies this to payment operations: sending the same charge request twice with the same idempotency key will only charge the customer once.
+
+**Webhook Event-Driven Architecture:** Stripe's webhook system implements the Observer pattern at the distributed systems level. When a billing event occurs, Stripe notifies all registered observers (webhook endpoints). This is based on the publish-subscribe messaging pattern, with at-least-once delivery guarantees and exponential backoff retries.
+
+**HMAC Authentication (RFC 2104):** Webhook signature verification uses HMAC-SHA256 — a keyed-hash message authentication code that proves the webhook came from Stripe and wasn't tampered with. HMAC is based on the Merkle-Damgard hash function construction.
+
+**Usage-Based Pricing Economics:** The pricing model follows the principle of price discrimination — charging customers based on their willingness to pay, which correlates with usage. The 10x value curve (each tier costs ~3x more but delivers ~10x usage) is based on Van Westendorp's Price Sensitivity Meter and the SaaS pricing strategies documented by Patrick Campbell at ProfitWell.`,
+      furtherReading: [
+        "Stripe API documentation — stripe.com/docs/api",
+        "Stripe Billing for SaaS — stripe.com/docs/billing/subscriptions/overview",
+        "Stripe Meters — stripe.com/docs/billing/subscriptions/usage-based/recording-usage",
+        "Designing Stripe-like APIs — blog.pragmaticengineer.com",
+      ],
+    },
+    {
+      name: "Next.js",
+      category: "framework",
+      icon: "NX",
+      tagline: "The React framework for the web",
+      origin: {
+        creator: "Guillermo Rauch & the Vercel team",
+        year: 2016,
+        motivation:
+          "Building production React applications required assembling a complex toolchain: Webpack, Babel, routing, server-side rendering, code splitting. Guillermo Rauch (creator of Socket.io, Mongoose) created Next.js to provide all of this out of the box with zero configuration. The framework follows the 'convention over configuration' philosophy — you create files in the right directories, and Next.js handles the rest.",
+      },
+      whatItIs: `Next.js is a full-stack React framework that provides:
+
+- **File-based Routing** — pages defined by filesystem structure (App Router)
+- **Server Components** — React components that render on the server (zero client JS)
+- **Server Actions** — form submissions and mutations without API routes
+- **Static Site Generation (SSG)** — pre-render pages at build time
+- **Server-Side Rendering (SSR)** — render pages on each request
+- **Incremental Static Regeneration (ISR)** — regenerate static pages on-demand
+- **API Routes** — backend endpoints alongside frontend code
+- **Middleware** — edge functions for request interception
+- **Image Optimization** — automatic image resizing and format conversion
+- **Built-in CSS/Tailwind Support** — zero-config styling
+
+Next.js is the most popular React framework, used by Netflix, TikTok, Twitch, Hulu, Nike, and thousands of other companies. Vercel (the company behind Next.js) provides hosting optimized for the framework.`,
+      explainLikeImTen: `Imagine you're building a website, and React gives you the LEGO bricks to build interactive pages. But you still need to figure out how to put the pages together, how to make them load fast, and how to show different pages when people click different links. Next.js is like a LEGO instruction book that comes with a display stand. It tells React how to organize the pages, makes them load super fast by building some pages ahead of time, and even gives you a way to talk to databases from the same project. Instead of figuring out 10 different tools, Next.js gives you everything in one box.`,
+      realWorldAnalogy: `If React is a set of high-quality building materials (bricks, steel, glass), Next.js is the architectural firm that turns those materials into a finished building. The firm handles the blueprints (routing), the foundation (server rendering), the insulation (optimization), the security system (middleware), and the elevator system (data fetching). You describe what rooms you want, and the firm figures out the best way to build them — some rooms pre-built for speed (static), some custom-built per visitor (dynamic).`,
+      whyWeUsedIt: `The LLM Gateway dashboard needs:
+- Server-side rendering for fast initial loads and SEO
+- Authentication-aware pages (redirect to login if not authenticated)
+- Real-time data display (usage charts, cost analytics)
+- Forms for configuration (routing weights, provider keys, billing)
+- Integration with Supabase Auth and the gateway's REST API
+
+**Why Next.js over Vite + React Router:**
+- Server Components reduce client-side JavaScript (dashboard pages are mostly data display)
+- Built-in middleware for auth redirects (check Supabase session before rendering)
+- API routes for proxying Stripe webhook events and billing actions
+- File-based routing matches the dashboard's page structure naturally
+
+**Why Next.js over Remix:**
+- Larger ecosystem and community
+- Better Vercel deployment story (important for SaaS)
+- Server Components (Remix uses loaders, a different model)
+- More third-party component libraries (shadcn/ui is Next.js-first)`,
+      howItWorksInProject: `- \`dashboard/\` directory contains the Next.js App Router application
+- \`dashboard/app/\` — route segments for all 21 pages
+- \`dashboard/app/(auth)/\` — login and signup pages (public)
+- \`dashboard/app/(dashboard)/\` — authenticated pages with sidebar layout
+- \`dashboard/components/\` — 8 shadcn/ui components (Button, Card, Input, Dialog, etc.)
+- \`dashboard/lib/supabase.ts\` — Supabase client initialization
+- \`dashboard/middleware.ts\` — auth middleware (redirect to login if no session)
+- Tailwind CSS with dark theme, responsive sidebar layout
+- Server Components for data fetching, Client Components for interactivity`,
+      featuresInProject: [
+        {
+          feature: "21-Page Dashboard Application",
+          description: "The dashboard includes auth pages (login, signup), and authenticated pages for overview, API keys, usage analytics, routing configuration, provider management, cache monitoring, billing, settings, and request logs.",
+        },
+        {
+          feature: "Server Components for Data Display",
+          description: "Dashboard pages like usage analytics and billing overview use Server Components to fetch data on the server (via Supabase queries) and send pre-rendered HTML to the client, reducing JavaScript bundle size.",
+        },
+        {
+          feature: "Auth Middleware",
+          description: "Next.js middleware checks for a valid Supabase session on every dashboard route. Unauthenticated requests are redirected to /login, and authenticated requests to auth pages are redirected to /dashboard.",
+        },
+        {
+          feature: "Dark Theme with Responsive Sidebar",
+          description: "The dashboard uses Tailwind CSS with a dark color scheme and a responsive sidebar that collapses on mobile, providing a professional admin panel experience across all device sizes.",
+        },
+        {
+          feature: "Stripe Billing Integration Pages",
+          description: "The billing page displays current plan, usage metrics, and upgrade options. Clicking 'Upgrade' creates a Stripe Checkout Session (via API route) and redirects to Stripe's hosted payment page.",
+        },
+      ],
+      coreConceptsMarkdown: `### App Router File-Based Routing
+
+\`\`\`
+dashboard/app/
+├── layout.tsx          # Root layout (dark theme, fonts)
+├── page.tsx            # Home page (redirects to /dashboard)
+├── (auth)/
+│   ├── login/page.tsx  # Login page
+│   └── signup/page.tsx # Signup page
+├── (dashboard)/
+│   ├── layout.tsx      # Sidebar layout
+│   ├── page.tsx        # Dashboard overview
+│   ├── keys/page.tsx   # API key management
+│   ├── usage/page.tsx  # Usage analytics
+│   ├── routing/page.tsx # Routing configuration
+│   ├── providers/page.tsx # Provider management
+│   ├── cache/page.tsx  # Cache monitoring
+│   ├── billing/page.tsx # Billing & plans
+│   ├── settings/page.tsx # Org settings
+│   └── logs/page.tsx   # Request logs
+\`\`\`
+
+### Server Components vs Client Components
+
+\`\`\`typescript
+// Server Component (default) — runs on the server
+// No "use client" directive needed
+export default async function UsagePage() {
+  const supabase = createServerClient();
+  const { data: usage } = await supabase
+    .from("usage_daily")
+    .select("*")
+    .order("date", { ascending: false })
+    .limit(30);
+
+  return <UsageChart data={usage} />;
+}
+
+// Client Component — runs in the browser
+"use client";
+export function UsageChart({ data }: { data: UsageDaily[] }) {
+  const [timeRange, setTimeRange] = useState("30d");
+  // Interactive chart with state
+  return <Chart data={data} range={timeRange} />;
+}
+\`\`\`
+
+### Middleware for Auth
+
+\`\`\`typescript
+// dashboard/middleware.ts
+import { createMiddlewareClient } from "@supabase/auth-helpers-nextjs";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export async function middleware(req: NextRequest) {
+  const res = NextResponse.next();
+  const supabase = createMiddlewareClient({ req, res });
+  const { data: { session } } = await supabase.auth.getSession();
+
+  // Redirect to login if not authenticated
+  if (!session && req.nextUrl.pathname.startsWith("/dashboard")) {
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  // Redirect to dashboard if already authenticated
+  if (session && (req.nextUrl.pathname === "/login" || req.nextUrl.pathname === "/signup")) {
+    return NextResponse.redirect(new URL("/dashboard", req.url));
+  }
+
+  return res;
+}
+\`\`\`
+
+### Server Actions for Mutations
+
+\`\`\`typescript
+// app/(dashboard)/settings/actions.ts
+"use server";
+
+export async function updateOrgSettings(formData: FormData) {
+  const supabase = createServerClient();
+  const name = formData.get("name") as string;
+  const routingStrategy = formData.get("routingStrategy") as string;
+
+  const { error } = await supabase
+    .from("organizations")
+    .update({ name, default_routing_strategy: routingStrategy })
+    .eq("id", orgId);
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard/settings");
+}
+\`\`\``,
+      prosAndCons: {
+        pros: [
+          "Zero-config setup — routing, bundling, SSR all work out of the box",
+          "Server Components reduce client-side JavaScript significantly",
+          "Excellent performance — automatic code splitting, image optimization, font optimization",
+          "File-based routing is intuitive for page-heavy applications",
+          "Huge ecosystem — shadcn/ui, next-auth, next-intl, etc.",
+          "Vercel deployment is seamless (but can deploy anywhere with Node.js)",
+        ],
+        cons: [
+          "App Router complexity — Server vs Client Components have a learning curve",
+          "Vercel-centric — some features work best on Vercel's platform",
+          "Bundle size can grow large for complex applications",
+          "Middleware runs on the edge (limited Node.js APIs available)",
+          "Caching behavior in App Router can be confusing and opaque",
+          "Breaking changes between major versions require significant migration effort",
+        ],
+      },
+      alternatives: [
+        {
+          name: "Remix",
+          comparison:
+            "Full-stack React framework with nested routing and data loaders. Better form handling and progressive enhancement. But smaller ecosystem, no Server Components, and less corporate backing.",
+        },
+        {
+          name: "Vite + React Router",
+          comparison:
+            "Lightweight SPA setup with fast builds. Full control over architecture. But no SSR out of the box, manual code splitting, and more configuration required.",
+        },
+        {
+          name: "Astro",
+          comparison:
+            "Content-focused framework with island architecture. Excellent for static sites and blogs. But less suited for highly interactive dashboard applications.",
+        },
+        {
+          name: "SvelteKit",
+          comparison:
+            "Full-stack framework for Svelte. Excellent performance, simpler mental model. But Svelte ecosystem is smaller than React's, and fewer pre-built UI components.",
+        },
+      ],
+      keyAPIs: [
+        "app/ directory — App Router file-based routing",
+        "page.tsx / layout.tsx / loading.tsx / error.tsx — special files",
+        "'use client' / 'use server' — component directives",
+        "generateMetadata() — dynamic page metadata",
+        "NextResponse / NextRequest — middleware APIs",
+        "revalidatePath() / revalidateTag() — on-demand revalidation",
+        "next/image — optimized image component",
+        "next/font — font optimization",
+      ],
+      academicFoundations: `**Server-Side Rendering (SSR):** The idea of rendering HTML on the server predates the SPA era. Next.js brings SSR back with React Server Components, combining the interactivity of SPAs with the performance of server-rendered pages. This is a pendulum swing back toward the original web architecture (server-rendered HTML) with modern enhancements.
+
+**Streaming & Suspense:** Next.js App Router uses React Suspense boundaries and HTTP streaming to progressively render pages. This is based on chunked transfer encoding (HTTP/1.1) and streaming architectures where the server sends HTML in chunks as data becomes available, rather than waiting for everything.
+
+**Islands Architecture:** While Next.js doesn't use the islands pattern directly, Server Components achieve a similar goal: most of the page is static HTML (server-rendered) with "islands" of interactivity (Client Components). This pattern was formalized by Katie Sylor-Miller and popularized by Astro.
+
+**Convention Over Configuration:** Next.js follows the Rails philosophy (David Heinemeier Hansson, 2004) where the framework makes decisions for you based on conventions (file-based routing, special file names) rather than requiring explicit configuration. This reduces boilerplate and cognitive overhead.
+
+**Incremental Static Regeneration:** ISR implements a hybrid between static and dynamic rendering, similar to the stale-while-revalidate cache control directive (RFC 5861). Pages are served from cache while being regenerated in the background, providing both performance and freshness.`,
+      furtherReading: [
+        "Next.js documentation — nextjs.org/docs",
+        "React Server Components RFC — github.com/reactjs/rfcs/pull/188",
+        "Patterns.dev — patterns.dev (React and rendering patterns)",
+        "Vercel Blog — vercel.com/blog (Next.js architecture deep dives)",
       ],
     },
   ],
