@@ -6,8 +6,6 @@ Each project includes core concept explanations, architecture diagrams, CI/CD pi
 
 ## Screenshots
 
-### Dark Mode
-
 <table>
   <tr>
     <td><img src="docs/screenshots/01-overview-dark.png" alt="Project Overview - Dark" width="400"/></td>
@@ -15,9 +13,9 @@ Each project includes core concept explanations, architecture diagrams, CI/CD pi
     <td><img src="docs/screenshots/03-architecture-dark.png" alt="Architecture - Dark" width="400"/></td>
   </tr>
   <tr>
-    <td align="center"><b>Project Overview</b><br/>Core concepts, design patterns, key takeaways, real-world examples</td>
-    <td align="center"><b>Core Concepts</b><br/>What It Is, Why It Matters, How Project Uses It, Key Terms</td>
-    <td align="center"><b>Architecture</b><br/>System overview with ASCII diagrams, component breakdowns</td>
+    <td align="center"><b>Project Overview</b><br/>Core concepts, patterns, takeaways, real-world examples</td>
+    <td align="center"><b>Core Concepts</b><br/>What It Is, Why It Matters, How Project Uses It</td>
+    <td align="center"><b>Architecture</b><br/>System overview with ASCII diagrams</td>
   </tr>
 </table>
 
@@ -28,44 +26,35 @@ Each project includes core concept explanations, architecture diagrams, CI/CD pi
     <td><img src="docs/screenshots/06-technology-deep-dive-dark.png" alt="Technology Deep Dive - Dark" width="400"/></td>
   </tr>
   <tr>
-    <td align="center"><b>CI/CD Pipeline</b><br/>Structured stages with tools, commands, infrastructure</td>
-    <td align="center"><b>Design Patterns</b><br/>Pattern explanations with code examples per project</td>
-    <td align="center"><b>Technology Deep Dive</b><br/>ELI10, analogy, origin story, code examples, pros/cons</td>
+    <td align="center"><b>CI/CD Pipeline</b><br/>Structured stages with tools and commands</td>
+    <td align="center"><b>Design Patterns</b><br/>Pattern explanations with code examples</td>
+    <td align="center"><b>Technology Deep Dive</b><br/>ELI10, analogy, origin story, pros/cons</td>
   </tr>
 </table>
 
 <table>
   <tr>
     <td><img src="docs/screenshots/07-rag-overview-dark.png" alt="RAG Eval Engine - Dark" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Multiple Projects</b><br/>7 projects with unique color-coded tabs</td>
-  </tr>
-</table>
-
-### Light Mode
-
-<table>
-  <tr>
     <td><img src="docs/screenshots/08-overview-light.png" alt="Project Overview - Light" width="400"/></td>
     <td><img src="docs/screenshots/09-agenthire-light.png" alt="AgentHire Overview - Light" width="400"/></td>
-    <td><img src="docs/screenshots/10-core-concepts-light.png" alt="Core Concepts - Light" width="400"/></td>
   </tr>
   <tr>
-    <td align="center"><b>LLM Gateway Overview</b><br/>Light theme with full project breakdown</td>
-    <td align="center"><b>AgentHire Overview</b><br/>Multi-agent platform with MCP, SSE, Ollama</td>
-    <td align="center"><b>Core Concepts</b><br/>Accordion-based concept exploration</td>
+    <td align="center"><b>RAG Eval Engine</b><br/>Different project with color-coded tabs</td>
+    <td align="center"><b>Light Mode — LLM Gateway</b><br/>Full project overview in light theme</td>
+    <td align="center"><b>Light Mode — AgentHire</b><br/>Multi-agent platform with MCP, SSE, Ollama</td>
   </tr>
 </table>
 
 <table>
   <tr>
+    <td><img src="docs/screenshots/10-core-concepts-light.png" alt="Core Concepts - Light" width="400"/></td>
     <td><img src="docs/screenshots/11-technology-viewer-light.png" alt="Technology Viewer - Light" width="400"/></td>
     <td><img src="docs/screenshots/12-architecture-light.png" alt="Architecture - Light" width="400"/></td>
   </tr>
   <tr>
-    <td align="center"><b>Technology Viewer</b><br/>MCP deep dive with ELI10, analogy, origin story</td>
-    <td align="center"><b>Architecture View</b><br/>System overview with ASCII diagrams</td>
+    <td align="center"><b>Light Mode — Core Concepts</b><br/>Accordion-based concept exploration</td>
+    <td align="center"><b>Light Mode — Tech Viewer</b><br/>MCP deep dive with ELI10, analogy, origin</td>
+    <td align="center"><b>Light Mode — Architecture</b><br/>System overview with ASCII diagrams</td>
   </tr>
 </table>
 
