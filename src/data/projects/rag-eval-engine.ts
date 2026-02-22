@@ -4,7 +4,7 @@ export const ragEvalEngine: Project = {
   id: "rag-eval-engine",
   name: "RAG Eval Engine",
   description:
-    "Production-grade RAG system with built-in evaluation harness — hybrid retrieval, multi-model LLM support, and continuous quality metrics.",
+    "Production-grade RAG system with semantic caching, multi-provider LLM routing (Ollama/OpenAI/Anthropic), self-learning adaptive retrieval, MCP server integration, and a 6-page evaluation dashboard — hybrid search, LLM-as-judge scoring, and cost tracking.",
   repo: "https://github.com/aptsalt/rag-eval-engine",
   languages: ["Python", "TypeScript", "SQL"],
   designPatterns: [
@@ -83,15 +83,19 @@ harness = EvaluationHarness(
       whatItIs:
         "Provides an interface for creating objects without specifying their exact class. The factory method lets a class defer instantiation to subclasses or configuration.",
       howProjectUsesIt:
-        "LLM providers (Ollama, OpenAI) are instantiated via a factory that reads configuration and returns the correct client. Switching between local Ollama and cloud OpenAI requires only a config change, not code changes.",
-      codeExample: `def create_llm_client(config: LLMConfig) -> LLMClient:
-    match config.provider:
-        case "ollama":
-            return OllamaClient(base_url=config.base_url, model=config.model)
-        case "openai":
-            return OpenAIClient(api_key=config.api_key, model=config.model)
-        case _:
-            raise ValueError(f"Unknown provider: {config.provider}")`,
+        "LLM providers (Ollama, OpenAI, Anthropic) are instantiated via a factory that reads the model name prefix and routes to the correct provider. Switching between local Ollama and cloud providers requires only changing the model name, not code.",
+      codeExample: `# Model name determines provider routing
+async def _generate(model: str, prompt: str) -> LLMResponse:
+    if model.startswith("claude-"):
+        return await _generate_anthropic(model, prompt)
+    elif model.startswith("gpt-"):
+        return await _generate_openai(model, prompt)
+    else:
+        return await _generate_ollama(model, prompt)  # Default: local
+
+# Each provider has its own cost calculation
+cost = calculate_cost(model, input_tokens, output_tokens)
+# Ollama: $0.00, GPT-4o: $2.50/$10 per M, Claude: $3/$15 per M`,
     },
     {
       name: "Observer Pattern",
@@ -101,6 +105,44 @@ harness = EvaluationHarness(
       howProjectUsesIt:
         "Quality metric callbacks observe the RAG pipeline execution. When a query completes, registered observers (metric collectors, loggers, dashboard updaters) are notified with the query results and evaluation scores.",
     },
+    {
+      name: "Cache-Aside Pattern",
+      category: "structural",
+      whatItIs:
+        "The application checks the cache before performing an expensive operation. On miss, it performs the operation and stores the result in cache for future requests.",
+      howProjectUsesIt:
+        "The semantic query cache checks Qdrant for embedding-similar previous queries (threshold 0.95) before running the full RAG pipeline. Cache hits return in <100ms vs 2-5s for full pipeline. TTL-based expiration ensures freshness.",
+      codeExample: `async def check_cache(query: str, collection: str) -> CacheResult | None:
+    query_embedding = await embed(query)
+    results = qdrant.search("_query_cache", query_embedding, limit=1)
+    if results and results[0].score >= CACHE_THRESHOLD:  # 0.95
+        return CacheResult.from_payload(results[0].payload)
+    return None  # Cache miss — run full pipeline`,
+    },
+    {
+      name: "Adapter Pattern",
+      category: "structural",
+      whatItIs:
+        "Converts the interface of a class into another interface clients expect. Lets classes with incompatible interfaces work together.",
+      howProjectUsesIt:
+        "Three LLM providers (Ollama, OpenAI, Anthropic) have different API formats. Each adapter normalizes the provider-specific response into a unified LLMResponse with text, token counts, and cost. The pipeline code is provider-agnostic.",
+    },
+    {
+      name: "Feedback Loop Pattern",
+      category: "behavioral",
+      whatItIs:
+        "System output is fed back as input to improve future behavior. The system learns from its own performance metrics over time.",
+      howProjectUsesIt:
+        "Evaluation scores (faithfulness, relevance) are correlated with retrieval parameters (alpha, top_k) stored in query_log. The auto-tune system analyzes historical performance to recommend optimal parameters — the system literally improves with usage.",
+      codeExample: `async def get_optimal_params(collection: str) -> tuple[float, int]:
+    # Bin alpha values (0.0-1.0), compute avg quality per bin
+    # Require minimum 3 data points per bin, 10 total queries
+    # Return (best_alpha, best_top_k) based on historical scores
+    rows = await db.execute("""
+        SELECT q.alpha, q.top_k, e.faithfulness, e.relevance
+        FROM query_log q JOIN eval_results e ON e.query_id = q.id
+        WHERE q.collection = ? LIMIT 500""", (collection,))`,
+    },
   ],
   keyTakeaways: [
     "RAG quality depends more on retrieval quality than generation quality — garbage in, garbage out.",
@@ -108,6 +150,10 @@ harness = EvaluationHarness(
     "Evaluation must be continuous — RAG quality degrades as the document corpus changes.",
     "Chunking strategy is the most underrated factor in RAG quality — overlap, size, and boundary detection all matter.",
     "Embedding model choice matters: domain-specific models outperform general models for specialized corpora.",
+    "Semantic caching (embedding similarity > 0.95) eliminates redundant LLM calls — sub-100ms responses vs 2-5s for cache hits.",
+    "Cost tracking per query is essential when routing across multiple LLM providers — Ollama is $0 but cloud models add up fast.",
+    "Self-learning retrieval (correlating eval scores with retrieval params) is a practical competitive moat that improves with usage.",
+    "Exposing RAG as MCP tools transforms it from an app into infrastructure that any AI agent can use.",
   ],
   coreConcepts: [
     {
@@ -187,6 +233,51 @@ harness = EvaluationHarness(
         { term: "Sentence Boundary Detection", definition: "Splitting chunks at natural sentence boundaries rather than arbitrary token counts, ensuring each chunk contains complete thoughts." },
       ],
     },
+    {
+      name: "Semantic Caching",
+      slug: "semantic-caching",
+      whatItIs:
+        "Caching query results keyed by embedding similarity rather than exact string match. Semantically identical questions like 'What is RAG?' and 'Explain RAG to me' produce cache hits even though the strings differ.",
+      whyItMatters:
+        "LLM inference is expensive (2-5 seconds, real cost for cloud models). Semantic caching can achieve 87%+ hit rates in production, reducing costs by 90%+ and delivering sub-100ms responses. Hash-based caches miss rephrased queries entirely.",
+      howProjectUsesIt:
+        "A dedicated Qdrant collection '_query_cache' stores query embeddings mapped to (answer, sources, eval_scores). On each query, the system embeds the question and searches the cache with a 0.95 similarity threshold. Hits return instantly; misses run the full pipeline and populate the cache with a configurable TTL (default 1 hour).",
+      keyTerms: [
+        { term: "Similarity Threshold", definition: "The minimum cosine similarity (0.95) between a new query embedding and a cached query to count as a hit. Higher = more precise but fewer hits." },
+        { term: "TTL (Time To Live)", definition: "How long cached results remain valid. Prevents serving stale answers when the underlying document corpus changes." },
+        { term: "Cache-Aside", definition: "Application checks cache first, falls back to compute on miss, then populates cache. The cache is passive — the application drives all reads and writes." },
+      ],
+    },
+    {
+      name: "Model Context Protocol (MCP)",
+      slug: "mcp",
+      whatItIs:
+        "An open protocol (by Anthropic) that lets AI tools and agents communicate with external data sources and services via a standardized JSON-RPC 2.0 interface over stdio or HTTP.",
+      whyItMatters:
+        "MCP transforms standalone applications into AI-native infrastructure. Instead of only humans using your RAG via a web UI, any MCP-compatible AI agent (Claude Code, custom agents) can query your knowledge base programmatically.",
+      howProjectUsesIt:
+        "The RAG engine exposes 5 MCP tools: rag_query (full pipeline), rag_retrieve (chunk retrieval), rag_ingest_text (add documents), rag_collections (list collections), and rag_metrics (evaluation summary). Claude Code can register this as an MCP server and query documents directly.",
+      keyTerms: [
+        { term: "JSON-RPC 2.0", definition: "A stateless, lightweight remote procedure call protocol using JSON. MCP uses this for all tool invocations." },
+        { term: "stdio Transport", definition: "MCP servers communicate over standard input/output streams, making them easy to spawn as subprocesses from any host application." },
+        { term: "Tool Schema", definition: "Each MCP tool declares its name, description, and JSON Schema for parameters — enabling AI agents to discover and invoke tools dynamically." },
+      ],
+    },
+    {
+      name: "Adaptive Retrieval (Self-Learning)",
+      slug: "adaptive-retrieval",
+      whatItIs:
+        "Automatically tuning retrieval parameters (alpha for hybrid blend, top_k for result count) based on historical evaluation scores. The system correlates what parameters were used with how good the results were.",
+      whyItMatters:
+        "Optimal retrieval parameters vary by corpus — a legal document collection may need different alpha/top_k than a codebase FAQ. Manual tuning is tedious and doesn't adapt as the corpus evolves. Self-learning makes the system improve with every query.",
+      howProjectUsesIt:
+        "Every query logs its alpha and top_k alongside evaluation scores in SQLite. The auto_tune module bins alpha values (0.0-1.0 in 0.1 steps), computes average quality per bin (requiring 3+ data points), and returns the optimal combination. The dashboard shows recommended params and an auto-tune button.",
+      keyTerms: [
+        { term: "Alpha (Hybrid Blend)", definition: "Weight between vector search (alpha=1.0) and BM25 keyword search (alpha=0.0). The optimal value depends on the corpus and query patterns." },
+        { term: "Binned Analysis", definition: "Grouping continuous parameter values into discrete bins and computing aggregate performance per bin. Reduces noise from individual query variance." },
+        { term: "Minimum Sample Threshold", definition: "Requiring minimum data points (10 total, 3 per bin) before making recommendations. Prevents overfitting to small sample sizes." },
+      ],
+    },
   ],
   videoResources: [
     {
@@ -258,21 +349,21 @@ harness = EvaluationHarness(
   ],
   cicd: {
     overview:
-      "Automated pipeline covering linting, type checking, testing, containerization, and continuous RAG quality evaluation. Every change is validated for code quality and RAG performance before merge.",
+      "GitHub Actions CI pipeline covering linting, type checking, testing, and dashboard build. Docker Compose orchestrates local development. Every change is validated for code quality before merge.",
     stages: [
       {
         name: "Linting",
-        tool: "Ruff",
+        tool: "Ruff + ESLint",
         description:
-          "Fast Python linting and formatting that replaces Black, isort, and flake8 in a single tool. Enforces consistent code style and catches common errors.",
-        commands: ["ruff check .", "ruff format ."],
+          "Ruff for Python (replaces Black, isort, flake8). ESLint for TypeScript dashboard. Both run in CI on every push.",
+        commands: ["ruff check .", "ruff format --check .", "cd dashboard && npx eslint ."],
       },
       {
         name: "Type Checking",
-        tool: "Pyright",
+        tool: "Pyright + tsc",
         description:
-          "Static type analysis in strict mode. Validates all type hints, catches type errors before runtime, and ensures type-safe configuration across the codebase.",
-        commands: ["pyright --project pyrightconfig.json"],
+          "Pyright strict mode for Python backend. TypeScript compiler for Next.js dashboard. Catches type errors before runtime across both languages.",
+        commands: ["pyright --project pyrightconfig.json", "cd dashboard && npx tsc --noEmit"],
       },
       {
         name: "Testing",
@@ -282,43 +373,56 @@ harness = EvaluationHarness(
         commands: ["pytest tests/ -v --asyncio-mode=auto"],
       },
       {
+        name: "Dashboard Build",
+        tool: "Next.js",
+        description:
+          "Full production build of the Next.js dashboard to catch build-time errors, missing imports, and SSR issues.",
+        commands: ["cd dashboard && npm ci && npm run build"],
+      },
+      {
         name: "Containerization",
         tool: "Docker Compose",
         description:
-          "Multi-service docker-compose orchestrating FastAPI backend, Qdrant vector DB, and Next.js dashboard. Ensures consistent deployment across environments.",
+          "Multi-service docker-compose with health checks, restart policies, and resource limits. Orchestrates FastAPI, Qdrant, and Next.js dashboard.",
         commands: ["docker-compose up --build"],
       },
       {
         name: "Evaluation",
         tool: "Custom Eval Harness",
         description:
-          "Automated evaluation harness runs on curated test datasets to track retrieval and generation quality over time. Measures faithfulness, relevance, and recall metrics.",
+          "Automated evaluation harness runs curated test datasets through the full RAG pipeline, scoring faithfulness, relevance, and recall with LLM-as-judge.",
         commands: ["python -m eval.run --dataset test_suite.json --output reports/"],
       },
     ],
     infrastructure:
-      "Docker Compose for local development and CI. Services: FastAPI backend (port 8000), Qdrant vector DB (port 6333), Next.js dashboard (port 3000).",
+      "GitHub Actions for CI (.github/workflows/ci.yml). Docker Compose for local dev. Services: FastAPI backend (port 8000), Qdrant vector DB (port 6333), Next.js dashboard (port 3000).",
   },
   architecture: [
     {
       title: "System Overview",
-      content: `The RAG Eval Engine is a complete Retrieval-Augmented Generation system with built-in quality evaluation.
+      content: `The RAG Eval Engine is a complete Retrieval-Augmented Generation system with semantic caching, multi-provider LLM routing, self-learning retrieval, MCP server integration, and a 6-page evaluation dashboard.
 
 **Pipeline:**
 1. **Ingestion** — Upload documents (PDF, DOCX, TXT) via API
-2. **Chunking** — Split documents into overlapping chunks with configurable size and overlap
-3. **Embedding** — Generate vector embeddings using sentence-transformers
-4. **Indexing** — Store embeddings in Qdrant vector database with BM25 index in parallel
-5. **Retrieval** — Hybrid search combining vector similarity and BM25 keyword matching
-6. **Generation** — Send retrieved context + query to LLM (Ollama or OpenAI)
-7. **Evaluation** — Score the response on faithfulness, relevance, and completeness`,
+2. **Chunking** — Split documents (3 strategies: fixed, sentence, paragraph) with configurable overlap
+3. **Embedding** — Generate vector embeddings using sentence-transformers (cached in Qdrant)
+4. **Indexing** — Store in Qdrant vector DB + BM25 index in parallel
+5. **Cache Check** — Semantic query cache (0.95 threshold) short-circuits on similar previous queries
+6. **Retrieval** — Hybrid search with adaptive alpha/top_k from self-learning auto-tuner
+7. **Generation** — Multi-provider LLM routing (Ollama/OpenAI/Anthropic) with cost tracking
+8. **Evaluation** — LLM-as-judge scoring on faithfulness, relevance, completeness
+9. **Feedback** — Scores + params logged for self-learning loop`,
       diagram: `Documents → [Chunker] → [Embedder] → Qdrant (vectors)
                                    → BM25 Index (keywords)
 
-Query → [Embedder] → Vector Search  ─┐
-     → [Tokenizer] → BM25 Search    ─┤→ [RRF Merge] → Top-K → [LLM] → Response
-                                      │
-                              [Evaluator] → Metrics`,
+Query → [Cache Check] → HIT → Cached Response ($0, <100ms)
+     ↓ MISS
+     → [Embedder] → Vector Search  ─┐
+     → [Tokenizer] → BM25 Search   ─┤→ [RRF Merge] → Top-K
+                                      ↓
+                     [LLM Router] → Ollama|OpenAI|Anthropic → Response
+                                      ↓
+                     [Evaluator] → Metrics → [Auto-Tune] → Feedback Loop`,
     },
     {
       title: "Hybrid Retrieval",
@@ -343,6 +447,56 @@ Query → [Embedder] → Vector Search  ─┐
 **Context Recall:** Did we retrieve all the necessary information? Compares against ground truth answers.
 
 The evaluation harness runs on curated test datasets and produces quality reports with trends over time.`,
+    },
+    {
+      title: "Semantic Query Cache",
+      content: `Embedding-based cache that eliminates redundant LLM calls for semantically similar queries.
+
+**How it works:**
+1. Each query is embedded and searched against the \`_query_cache\` Qdrant collection
+2. If a cached entry has cosine similarity >= 0.95, return the cached answer immediately
+3. On cache miss, run the full pipeline and store the result with a TTL (default 1 hour)
+4. Cache stats (hit rate, saved latency, cost savings) are tracked in SQLite
+
+**Why semantic over hash-based:** "What is RAG?" and "Explain RAG to me" have different hashes but nearly identical embeddings. Hash caches miss these; semantic caches catch them.
+
+**Inspired by:** FACT (Fast Adaptive Caching Technology) pattern achieving 87% hit rates and 93% cost reduction in production RAG systems.`,
+    },
+    {
+      title: "Multi-Provider LLM Routing",
+      content: `Unified interface routing queries to Ollama (local/free), OpenAI, or Anthropic based on model name prefix.
+
+**Routing logic:** \`claude-*\` → Anthropic API, \`gpt-*\` → OpenAI API, everything else → Ollama (local)
+
+**Cost tracking:** Every query logs input/output tokens and computes cost from a lookup table (GPT-4o: $2.50/$10 per M tokens, Claude Sonnet: $3/$15, Ollama: $0). Dashboard shows cumulative cost and per-query cost breakdown.
+
+**Why not an SDK for Anthropic:** Raw httpx calls avoid a heavy dependency for a single API endpoint. The Anthropic Messages API is clean enough that a direct HTTP call is simpler than an SDK wrapper.`,
+    },
+    {
+      title: "MCP Server Integration",
+      content: `The RAG engine doubles as an MCP (Model Context Protocol) server, exposing 5 tools over JSON-RPC 2.0 stdio transport.
+
+**Tools:**
+- \`rag_query\` — Full pipeline: retrieve + generate + evaluate
+- \`rag_retrieve\` — Return ranked chunks without generation
+- \`rag_ingest_text\` — Add raw text to a collection
+- \`rag_collections\` — List collections with document/chunk counts
+- \`rag_metrics\` — Evaluation summary (avg faithfulness, relevance, cost)
+
+**Why MCP:** Transforms the RAG engine from a standalone web app into composable AI infrastructure. Any MCP client (Claude Code, custom agents) can query the knowledge base programmatically without the web UI.`,
+    },
+    {
+      title: "Self-Learning Adaptive Retrieval",
+      content: `The system automatically tunes retrieval parameters by correlating historical eval scores with the alpha and top_k values used.
+
+**Process:**
+1. Every query logs its alpha (hybrid blend weight) and top_k alongside eval scores
+2. The auto_tune module bins alpha values (0.0-1.0 in 0.1 steps)
+3. For each bin with >= 3 data points, compute average quality (mean of faithfulness + relevance)
+4. Return the alpha bin and top_k with highest average quality
+5. Dashboard shows recommended params with an "Auto-tune" button
+
+**Minimum threshold:** 10 total queries before recommendations activate, preventing overfitting to small samples. Inspired by RuVector and SONA self-learning retrieval patterns.`,
     },
   ],
   technologies: [
@@ -1178,16 +1332,17 @@ RRF combines ranked lists without needing to normalize scores across different s
 - **GPU acceleration** — CUDA (NVIDIA), Metal (Apple), ROCm (AMD)`,
       explainLikeImTen: `Ollama is like having a really smart robot assistant that lives right on your computer instead of in the cloud. Normally, when you use AI (like ChatGPT), your questions travel over the internet to a big company's servers. Ollama lets you download the AI brain onto your own computer so it runs right there — no internet needed, no one else sees your questions, and you can use it for free as much as you want. You just tell it which AI brain to download ("pull llama3") and start chatting, kind of like downloading an app.`,
       realWorldAnalogy: `Ollama is like a home espresso machine vs going to Starbucks. Starbucks (cloud AI APIs) is convenient — no setup, always available, professionally maintained. But you pay per cup, you wait in line, and they know your order history. A home espresso machine (Ollama) requires buying the equipment and learning to use it, but then every cup is free, instant, and completely private. The quality depends on your machine (GPU), and you can experiment with any beans (models) you want.`,
-      whyWeUsedIt: `The RAG system uses LLMs for answer generation and LLM-as-judge evaluation. Ollama provides:
-- Zero cloud API costs — all inference runs on local GPU (RTX 4090)
+      whyWeUsedIt: `The RAG system uses LLMs for answer generation and LLM-as-judge evaluation. Ollama is the default provider (zero cost), with cloud providers (OpenAI, Anthropic) available for higher-quality generation:
+- Zero cloud API costs — local inference on GPU (RTX 4090)
 - Data privacy — documents never leave the machine
 - Model flexibility — switch between Llama, Mistral, Qwen without code changes
-- OpenAI-compatible API — same client code works with Ollama and OpenAI`,
-      howItWorksInProject: `- Runs as a local service on port 11434
-- RAG backend calls Ollama API for answer generation
-- Multiple models used: small (phi, qwen) for evaluation, large (llama3) for generation
-- OpenAI Python SDK connects to Ollama's compatible API
-- Model selection configurable per-request`,
+- OpenAI-compatible API — same client code works with Ollama and OpenAI
+- Multi-provider routing — model name prefix determines provider (claude-* → Anthropic, gpt-* → OpenAI, else → Ollama)`,
+      howItWorksInProject: `- Default provider: Ollama on port 11434 ($0 per query)
+- Cloud fallback: OpenAI (gpt-4o) and Anthropic (claude-sonnet) for higher quality
+- Multi-provider cost tracking: each query logs input/output tokens and USD cost
+- RAG backend routes by model name prefix — no code changes needed to switch providers
+- Multiple local models: small (phi, qwen) for eval, large (llama3) for generation`,
       featuresInProject: [
         {
           feature: "Answer Generation",
@@ -1512,42 +1667,41 @@ class QueryRequest(BaseModel):
 - Built-in image optimization for document thumbnails and chart exports
 - Loading states and error boundaries per route segment for graceful UX during long evaluation runs
 - TypeScript strict mode ensures type safety across the entire frontend codebase`,
-      howItWorksInProject: `- Dashboard in \`dashboard/\` directory using App Router
-- Root layout with sidebar navigation and header
-- Server components for pages: document list (\`/documents\`), evaluation results (\`/eval\`), metrics dashboard (\`/metrics\`)
-- Client components for interactive features: query form, document upload dropzone, real-time streaming response display
-- Route handlers in \`app/api/\` proxy requests to the FastAPI backend (POST /api/query, POST /api/ingest, GET /api/eval)
-- Server actions for form submissions (document upload, query submission)
-- Recharts-based visualization components for evaluation metrics (faithfulness, relevance, recall trends over time)
-- Loading.tsx skeletons for each route segment during data fetching
-- Error.tsx boundaries catch and display backend API errors gracefully
-- Middleware checks authentication before accessing the dashboard
+      howItWorksInProject: `- 6-page dashboard in \`dashboard/\` directory using App Router
+- Root layout with sidebar navigation (keyboard shortcut hints), global Ctrl+K shortcut
+- 6 pages: Query Playground, Documents, Retrieval, Evaluation, Test Sets, Settings
+- Toast notifications on upload/delete, skeleton loading states (shimmer, not spinners)
+- Recharts-based visualization: quality trends, token usage, cost per query
+- Markdown rendering for AI responses (bold, code blocks, lists)
+- CSV export for evaluation metrics
+- Cache hit badges and cost badges on query responses
+- Auto-tune button on Retrieval page fetches and applies optimal params
 - Tailwind CSS + shadcn/ui for consistent, accessible component styling`,
       featuresInProject: [
         {
-          feature: "Evaluation Dashboard (Server Component)",
+          feature: "Query Playground with Keyboard Shortcuts",
           description:
-            "The /eval page is a React Server Component that fetches the latest evaluation results directly from the FastAPI backend on the server. No JavaScript is sent to the browser for the data table — just rendered HTML with faithfulness, relevance, and recall scores.",
+            "The home page has a query input with Ctrl+K focus shortcut, collection selector, model picker, and shows streaming AI responses with markdown rendering. Displays 'Cached' badge on cache hits and cost badge for cloud LLM queries.",
         },
         {
-          feature: "Interactive Query Interface (Client Component)",
+          feature: "Document Management with Toast Notifications",
           description:
-            "The /query page uses a 'use client' component with useState and useEffect to handle user input, submit queries to the backend, and stream the LLM-generated answer in real time with a typewriter effect.",
+            "The /documents page shows collections with document/chunk counts, supports drag-and-drop upload (PDF, DOCX, TXT), and shows toast notifications on successful upload/delete with skeleton loading states.",
         },
         {
-          feature: "Document Upload with Drag-and-Drop",
+          feature: "Evaluation Dashboard with Cost Tracking",
           description:
-            "A client component dropzone on /documents accepts PDF, DOCX, and TXT files, uploads them via a Next.js API route handler that proxies to the FastAPI /ingest endpoint, and shows ingestion progress in real time.",
+            "The /eval page displays 5 metric cards (faithfulness, relevance, cost, cache stats, queries), Recharts time-series charts for quality trends, and a CSV export button for downloading all metrics.",
         },
         {
-          feature: "API Route Proxy Layer",
+          feature: "Retrieval Tuning with Auto-Tune",
           description:
-            "Route handlers in app/api/ forward frontend requests to the Python FastAPI backend, hiding the backend URL from the browser, handling CORS, and attaching authentication headers.",
+            "The /retrieval page has alpha/top_k sliders for hybrid search tuning, real-time chunk preview, and an auto-tune button that calls the API to fetch optimal params based on historical eval scores.",
         },
         {
-          feature: "Metrics Visualization Dashboard",
+          feature: "Skeleton Loading States",
           description:
-            "The /metrics page renders Recharts line charts and bar graphs showing evaluation metric trends over time — faithfulness, answer relevance, context relevance, and context recall — using server-fetched data with client-side chart interactivity.",
+            "Reusable shimmer skeleton components (SkeletonCard, SkeletonChart, SkeletonText) replace all 'Loading...' text across the dashboard, providing polished perceived performance.",
         },
       ],
       coreConceptsMarkdown: `### App Router Architecture
@@ -1558,24 +1712,24 @@ The App Router (introduced in Next.js 13) is built on React Server Components an
 dashboard/
   src/
     app/
-      layout.tsx        # Root layout — sidebar nav, header (shared across all pages)
-      page.tsx           # Home page (/)
-      loading.tsx        # Root loading skeleton
-      error.tsx          # Root error boundary
-      not-found.tsx      # 404 page
+      layout.tsx        # Root layout — sidebar nav, keyboard shortcuts, meta tags
+      page.tsx           # Query Playground (/) — Ctrl+K shortcut, streaming, cache badges
       documents/
-        page.tsx         # /documents — document list (Server Component)
-        upload/
-          page.tsx       # /documents/upload — upload form (Client Component)
-      query/
-        page.tsx         # /query — interactive query interface
+        page.tsx         # /documents — collection list, upload, toast notifications
+      retrieval/
+        page.tsx         # /retrieval — alpha/top_k sliders, auto-tune button
       eval/
-        page.tsx         # /eval — evaluation results list
-        [id]/
-          page.tsx       # /eval/:id — single evaluation detail
-          loading.tsx    # Loading state for eval detail
-      metrics/
-        page.tsx         # /metrics — charts and graphs
+        page.tsx         # /eval — 5 metric cards, cost tracking, CSV export
+      test-sets/
+        page.tsx         # /test-sets — curated evaluation datasets
+      settings/
+        page.tsx         # /settings — system status, model config, connection health
+    components/
+      sidebar.tsx        # Navigation with keyboard shortcut hints
+      toast.tsx          # Lightweight toast notification system (auto-dismiss 4s)
+      skeleton.tsx       # Reusable shimmer skeletons (SkeletonCard, SkeletonChart)
+    lib/
+      api.ts             # Typed API client (cache stats, cost tracking, auto-tune)
       api/
         query/
           route.ts       # POST /api/query — proxy to FastAPI
