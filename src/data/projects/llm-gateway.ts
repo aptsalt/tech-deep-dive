@@ -2665,9 +2665,9 @@ Next.js is the most popular React framework, used by Netflix, TikTok, Twitch, Hu
 - \`dashboard/app/(auth)/\` — login and signup pages (public)
 - \`dashboard/app/(dashboard)/\` — authenticated pages with sidebar layout
 - \`dashboard/components/\` — 8 shadcn/ui components (Button, Card, Input, Dialog, etc.)
-- \`dashboard/lib/supabase.ts\` — Supabase client initialization
+- \`dashboard/lib/supabase.ts\` — Supabase client initialization (optional — dashboard works without auth)
 - \`dashboard/middleware.ts\` — auth middleware (redirect to login if no session)
-- Tailwind CSS with dark theme, responsive sidebar layout
+- Tailwind CSS with dark/light/system theme toggle, responsive sidebar layout
 - Server Components for data fetching, Client Components for interactivity`,
       featuresInProject: [
         {
@@ -2683,8 +2683,8 @@ Next.js is the most popular React framework, used by Netflix, TikTok, Twitch, Hu
           description: "Next.js middleware checks for a valid Supabase session on every dashboard route. Unauthenticated requests are redirected to /login, and authenticated requests to auth pages are redirected to /dashboard.",
         },
         {
-          feature: "Dark Theme with Responsive Sidebar",
-          description: "The dashboard uses Tailwind CSS with a dark color scheme and a responsive sidebar that collapses on mobile, providing a professional admin panel experience across all device sizes.",
+          feature: "Dark/Light Theme Toggle with Responsive Sidebar",
+          description: "The dashboard uses Tailwind CSS with CSS variable-based theming (bg-card, border-border, text-muted-foreground) and a ThemeToggle component supporting dark, light, and system modes via next-themes. The responsive sidebar collapses on mobile.",
         },
         {
           feature: "Stripe Billing Integration Pages",
@@ -2695,7 +2695,7 @@ Next.js is the most popular React framework, used by Netflix, TikTok, Twitch, Hu
 
 \`\`\`
 dashboard/app/
-├── layout.tsx          # Root layout (dark theme, fonts)
+├── layout.tsx          # Root layout (theme provider, fonts)
 ├── page.tsx            # Home page (redirects to /dashboard)
 ├── (auth)/
 │   ├── login/page.tsx  # Login page

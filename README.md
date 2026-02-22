@@ -62,7 +62,7 @@ Each project includes core concept explanations, architecture diagrams, CI/CD pi
 
 | Project | Description | Technologies |
 |---------|-------------|:------------:|
-| **LLM Gateway** | Multi-provider LLM gateway with semantic caching, cost-optimized routing, circuit breaker | 9 |
+| **LLM Gateway** | Multi-tenant SaaS LLM gateway with semantic caching, cost-optimized routing, Stripe billing, and Next.js dashboard | 9 |
 | **RAG Eval Engine** | Production RAG system with hybrid retrieval and evaluation harness | 8 |
 | **AgentHire** | Multi-agent AI platform with MCP servers, SSE streaming, local LLM inference | 8 |
 | **Enterprise Playground** | Fine-tuning platform with QLoRA, web scraping, domain-specific training | 8 |
