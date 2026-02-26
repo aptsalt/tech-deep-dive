@@ -4,12 +4,14 @@ export { agenthire } from "./agenthire";
 export { enterprisePlayground } from "./enterprise-playground";
 export { moleWorld } from "./mole-world";
 export { animatedWebGL, contextEngineeringAcademy } from "./remaining-projects";
+export { contextEngineering } from "./context-engineering";
 import { llmGateway } from "./llm-gateway";
 import { ragEvalEngine } from "./rag-eval-engine";
 import { agenthire } from "./agenthire";
 import { enterprisePlayground } from "./enterprise-playground";
 import { moleWorld } from "./mole-world";
 import { animatedWebGL, contextEngineeringAcademy } from "./remaining-projects";
+import { contextEngineering } from "./context-engineering";
 import { Project } from "../types";
 
 export const allProjects: Project[] = [
@@ -20,4 +22,5 @@ export const allProjects: Project[] = [
   moleWorld,
   animatedWebGL,
   contextEngineeringAcademy,
+  contextEngineering,
 ];

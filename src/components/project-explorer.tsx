@@ -62,6 +62,7 @@ const projectTabColors: Record<string, string> = {
   "mole-world": "text-rose-700 dark:text-rose-300 data-[state=active]:text-rose-800 dark:data-[state=active]:text-rose-200 after:!bg-rose-700",
   "animated-webgl-library": "text-violet-700 dark:text-violet-300 data-[state=active]:text-violet-800 dark:data-[state=active]:text-violet-200 after:!bg-violet-700",
   "context-engineering-academy": "text-teal-700 dark:text-teal-300 data-[state=active]:text-teal-800 dark:data-[state=active]:text-teal-200 after:!bg-teal-700",
+  "context-engineering": "text-indigo-700 dark:text-indigo-300 data-[state=active]:text-indigo-800 dark:data-[state=active]:text-indigo-200 after:!bg-indigo-700",
 };
 
 const companyFavicons: Record<string, string> = {
@@ -611,12 +612,12 @@ export function ProjectExplorer() {
             setSelectedView({ type: "overview" });
           }}
         >
-          <TabsList variant="line" className="w-full overflow-x-auto flex-nowrap">
+          <TabsList variant="line" className="w-full flex-wrap">
             {allProjects.map((p) => (
               <TabsTrigger
                 key={p.id}
                 value={p.id}
-                className={`whitespace-nowrap text-xs font-semibold ${projectTabColors[p.id] || ""}`}
+                className={`text-xs font-semibold ${projectTabColors[p.id] || ""}`}
               >
                 {p.name}
               </TabsTrigger>
